@@ -1,0 +1,27 @@
+# Secrets — never committed. .env holds node URL and DUST-ONLY test mnemonics.
+.env
+
+# Build artifacts
+target/
+project/target/
+project/project/
+.bsp/
+
+# Editor / logs
+.vscode/
+.idea/
+*.log
+
+# Editor/metals artifacts
+.metals/
+.mcp.json
+
+# Harness/session artifacts and superseded run scraps
+.claude/
+JITCOST.raw.md
+JITCOST.run1.md
+
+# Internal working docs — session kickoffs and strategy drafts stay local
+PHASE2-KICKOFF.md
+kickoff-phase1.md
+sigmafi-pooled-origination-outline.md
