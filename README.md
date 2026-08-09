@@ -76,6 +76,29 @@ Card R8 (`Coll[Coll[Byte]]`): `[poolNFT, collateralTokenId,
 attesterScriptHash?, feeRecipientHash?]`. Card R9: publisher /
 version / predecessor (informational only).
 
+What the terms mean:
+
+| term | meaning |
+|---|---|
+| crankBounty | what a keeper earns for advancing one checkpoint; the borrower pre-pays one per checkpoint into escrow at origination |
+| graceBlocks | how long after a failed health check (or missed coupon) the borrower has before the loan becomes seizable |
+| liqCarveout | slice of a liquidation kept by whoever fires it, so liquidation pays for itself and needs no funded keeper |
+| haircutKeep | how much of the token collateral's simulated sale value counts, out of 10000 — 9800 means a 2% slippage discount |
+| thresholdMin/Max | allowed range for a loan's maintenance threshold: collateral value / debt, in basis points (15000 = 150%); below it the loan is unhealthy and can be cured or seized |
+| minOrderValue | smallest collateral (net of escrow) the card will originate |
+| minPeriod | shortest allowed gap between checkpoints, in blocks |
+| minCoupon | smallest allowed instalment payment |
+| attestationType | which health oracle the covenant uses; 0 = the pinned DEX pool's price, the only type the order contract accepts today |
+| flagWord | reserved on/off switches for future card behaviours; all zero in rev 3 |
+| poolNFT | the exact DEX pool box (identified by its NFT) used to price collateral |
+| collateralTokenId | the only token the card accepts as collateral — it must be the pool's traded token or the covenant couldn't price it |
+| attesterScriptHash | future use: the contract allowed to attest health when attestationType != 0 |
+| feeRecipientHash | future use: where card-level fees would go |
+
+Any value set to 0/empty means "use the protocol default" — the
+compiled constants are the implicit base product, and a card can only
+tighten the floors, never loosen them.
+
 Decode any live card to plain english:
 
 ```bash
