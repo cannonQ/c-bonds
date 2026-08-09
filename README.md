@@ -56,11 +56,31 @@ acceleration after grace. Exit outputs carry `R4 = SELF.id` plus the
 loan token as the settlement receipt.
 
 **Cards (`TermsBox.es`):** one immutable refuel-only box per loan
-product, minted with its own NFT, EIP-4 browsable. R7 numeric pack +
-flag word, R8 id fields, sentinel 0/empty = compiled default. The
-borrower pins the card NFT in the order before match; the funder can
-never choose the tier. Anyone may publish a card; there is no admin
-key anywhere.
+product, minted with its own NFT, EIP-4 browsable. The borrower pins
+the card NFT in the order before match; the funder can never choose
+the tier. Anyone may publish a card; there is no admin key anywhere.
+Sentinel 0/empty = compiled protocol default throughout.
+
+Card R7 (`Coll[Long]`, size 11) — indices 0–3 copy into bond R9 6–9:
+
+| idx | field | idx | field |
+|---|---|---|---|
+| 0 | crankBounty | 6 | minOrderValue (floor) |
+| 1 | graceBlocks | 7 | minPeriod (floor) |
+| 2 | liqCarveout | 8 | minCoupon (floor) |
+| 3 | haircutKeep | 9 | attestationType (0 = pool-price) |
+| 4 | thresholdMin (bps) | 10 | flagWord (reserved) |
+| 5 | thresholdMax (bps) | | |
+
+Card R8 (`Coll[Coll[Byte]]`): `[poolNFT, collateralTokenId,
+attesterScriptHash?, feeRecipientHash?]`. Card R9: publisher /
+version / predecessor (informational only).
+
+Decode any live card to plain english:
+
+```bash
+sbt "runMain bonds.CardInfo <cardNftId>"
+```
 
 **Conforming rule (registry side):** a loan is conforming iff its loan
 token id resolves to a box at the conforming order address. Token ids
