@@ -178,10 +178,10 @@ object A6_ForgedBondProvenance {
         .tokens(new ErgoToken(fake, 1L))
         .registers(
           ErgoValue.of(fake.getBytes),                  // R4 mimics an order id
-          ErgoValue.of(kAddr.getPublicKey),             // R5 forger as borrower
+          ErgoValue.of(kTree.bytes),                    // R5 forger as borrower (script bytes, rev 3)
           ErgoValue.of(1L),                             // R6 token repayment
           ErgoValue.of(h + 10000),                      // R7
-          ErgoValue.of(kTree.bytes),                    // R8 forger as lender
+          P4.packValue(Seq(kTree.bytes)),               // R8 forger as lender (pack, covenant-off)
           ErgoValue.of(Array[Long](0L, 0L, 0L, (h + 10000).toLong, 0L, 0L))
         ).build()
       val unsigned = tb.boxesToSpend(funds.asJava).outputs(forged)
@@ -255,6 +255,10 @@ object A8_CancelMintForgery {
       val bAddr    = b.getEip3Addresses.get(0)
       val orderBox = ctx.getBoxesById(orderId)(0)
 
+      // Rev 3: cancel is authorized by borrower-script co-spend, so the
+      // borrower's fee boxes ride along as inputs (order stays INPUTS(0)).
+      val coSpend = Kit.selectBoxes(ctx, bAddr, Kit.TX_FEE)
+
       // Fresh TxBuilder per transaction: appkit forbids calling
       // boxesToSpend twice on one builder ("inputs already specified").
       def cancelTx(withMint: Boolean) = {
@@ -263,7 +267,7 @@ object A8_CancelMintForgery {
           .value(orderBox.getValue - Kit.TX_FEE)
           .contract(bAddr.toErgoContract)
         if (withMint) ob = ob.tokens(new ErgoToken(orderBox.getId, 1L))
-        tb.boxesToSpend(java.util.Arrays.asList(orderBox))
+        tb.boxesToSpend((Seq(orderBox) ++ coSpend).asJava)
           .outputs(ob.build())
           .fee(Kit.TX_FEE)
           .sendChangeTo(bAddr)
@@ -316,7 +320,7 @@ object A9_LoanTokenOverMint {
         .registers(
           ErgoValue.of(orderBox.getId.getBytes), orderBox.getRegisters.get(0),
           ErgoValue.of(repayment), ErgoValue.of(maturity),
-          ErgoValue.of(vault.bytes),
+          P4.packValue(Seq(vault.bytes)),
           ErgoValue.of(Array[Long](tmpl(0), tmpl(1), tmpl(2),
             (maturity - TestLib.TERM_LONG).toLong + tmpl(1), tmpl(4), tmpl(5)))
         ).build()
@@ -332,12 +336,14 @@ object A9_LoanTokenOverMint {
       ()
     }
     // cleanup: order untouched, borrower cancels to recover collateral
+    // (rev 3: borrower-script co-spend authorizes the cancel)
     Kit.exec { ctx =>
       val b        = TestLib.borrower(ctx); val bAddr = b.getEip3Addresses.get(0)
       val orderBox = ctx.getBoxesById(orderId)(0)
+      val coSpend  = Kit.selectBoxes(ctx, bAddr, Kit.TX_FEE)
       val tb       = ctx.newTxBuilder()
       val out      = tb.outBoxBuilder().value(orderBox.getValue - Kit.TX_FEE).contract(bAddr.toErgoContract).build()
-      val tx       = tb.boxesToSpend(java.util.Arrays.asList(orderBox)).outputs(out)
+      val tx       = tb.boxesToSpend((Seq(orderBox) ++ coSpend).asJava).outputs(out)
         .fee(Kit.TX_FEE).sendChangeTo(bAddr).build()
       val txId = Kit.sendSafe(ctx, b.sign(tx), "A9-cleanup cancel")
       Kit.waitConfirmed(txId, "A9-cleanup cancel")

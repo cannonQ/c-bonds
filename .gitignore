@@ -21,7 +21,20 @@ project/project/
 JITCOST.raw.md
 JITCOST.run1.md
 
+# Evidence packs are internal verification records — local only
+PHASE*-EVIDENCE.md
+
 # Internal working docs — session kickoffs and strategy drafts stay local
 PHASE2-KICKOFF.md
 kickoff-phase1.md
 sigmafi-pooled-origination-outline.md
+PHASE3-KICKOFF.md
+PHASE4-KICKOFF.md
+PHASE4-DECISIONS.md
+TERMSBOX-HANDOFF.md
+TERMSBOX-RESEARCH.md
+TERMSBOX-VECTORS.md
+CONTRACT-DELTAS.md
+REV3-KICKOFF.md
+REV3-LAYOUT.md
+CHEESE-REVIEW.md

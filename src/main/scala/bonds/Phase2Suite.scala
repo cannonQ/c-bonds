@@ -164,14 +164,14 @@ object B_SuccessorWall {
       rejectCrank("B1 successor R4 (order id) mutated",
         honest.copy(r4 = ErgoValue.of(Array.fill[Byte](32)(0))))
       rejectCrank("B2 successor R5 (borrower key) swapped to the keeper",
-        honest.copy(r5 = ErgoValue.of(kAddr.getPublicKey)))
+        honest.copy(r5 = ErgoValue.of(kAddr.toErgoContract.getErgoTree.bytes)))
       rejectCrank("B3 successor R6 (repayment) reduced by 1",
         honest.copy(r6 = ErgoValue.of(
           bondBox.getRegisters.get(2).getValue.asInstanceOf[Long] - 1L)))
       rejectCrank("B4 successor R7 (maturity) extended by 100",
         honest.copy(r7 = ErgoValue.of(maturity + 100)))
       rejectCrank("B5 successor R8 (lender script) off by one byte",
-        honest.copy(r8 = ErgoValue.of(TestLib.vaultVariantTree().bytes)))
+        honest.copy(r8 = P4.packValue(Seq(TestLib.vaultVariantTree().bytes))))
 
       // every schedule element beyond the permitted advance
       rejectCrank("B6a schedule installment mutated",       honest.copy(r9 = mutSched(0, 1L)))

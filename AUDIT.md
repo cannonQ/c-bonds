@@ -167,3 +167,117 @@ accident.
 |---|---|---|
 | ConformingBond | 566 | 0x18 (size bit set) |
 | ConformingOrder | 677 | 0x18 (size bit set) |
+
+---
+
+# EKB Two-Pass Audit — Phase 3 contracts (2026-08-04, pre-deployment)
+
+Run on the revised pair (bond + covenant/cure/acceleration, order +
+threshold-range/collateral-binding) after the compile gate and before any
+Phase 3 dust moved. Intent descriptions carried all six pinned §4
+decisions including the cure-gate limbo-trap fix (cure = in-cure +
+post-cure-healthy, NO deadline; deadline gates acceleration only) so the
+design change was audited as intent, not accident. JitCost was measured
+BEFORE the audit via local reduce against the live pool (all four
+covenant shapes 202,794–205,372; ~41% of the 500K budget).
+
+## ConformingBond.es (Phase 3) — 9.5/10, no changes required
+
+- No CRITICAL/HIGH/MEDIUM. All six paths enumerated; signatureless arm
+  branches pairwise disjoint (crank vs accelerate by sign of sched(3);
+  both vs liquidate by HEIGHT < maturity vs >=). The crank verdict is a
+  single whole-pack equality against if(healthy) advancePack else
+  curePack, both derived exclusively from SELF + the NFT-authenticated
+  pool — the keeper cannot choose the branch (V8 MED-1 held on all three
+  successor pack shapes: advance, cure-enter, cure-restore).
+- Data-input trust boundary (first in the project): dataInputs(0)
+  authenticated by POOL_NFT singleton at tokens(0), index hard-pinned to
+  0, collateral token bound to pool.tokens(2)._1, R4 fee isDefined-
+  guarded, pool shape pinned (tokens.size == 3). Stale pool boxes are
+  spent boxes and cannot be data inputs — singleton => freshness free.
+- BigInt sim: worst-case adversarial magnitude ~1.6e66 << 2^255; no
+  BigInt.toLong/.toBytes anywhere. thresholdBps == 0 short-circuits
+  before any pool read (Phase 1/2 bonds stay data-input-free).
+- INFO-1 (document + test): a failed checkpoint whose deadline
+  -(sched(3)) >= maturity has an EMPTY acceleration window — the bond
+  rides to plain liquidation at maturity (strictly easier for the
+  lender; no harm). Pin by test.
+- INFO-2: forged bonds with absurd registers (negative threshold =
+  always-healthy; Long.MinValue nextCheck = cure/accelerate arithmetic
+  throw) only brick or drain themselves; order-side pins keep conforming
+  bonds out of these states. Existing posture.
+- INFO-3: a late cure restores nextCheck = checkpoint + period which may
+  be far below HEIGHT — the successor is then crankable in immediate
+  succession until the grid catches up, one bounty per grid point
+  (catch-up, not drain; K-bound preserved).
+- VERIFICATION FINDINGS (Pass 2): deadline-boundary (HEIGHT ==
+  -sched(3)) is a cure-vs-accelerate race resolved first-confirm-wins by
+  design — pin by test; short-period (MIN_PERIOD 4 < GRACE 10)
+  interaction traced sound (grid points inside a cure window are simply
+  the next restore targets; no bounty stranding in any exit:
+  repay -> borrower, liquidate/accelerate -> lender, catch-up -> keeper).
+
+## ConformingOrder.es (Phase 3 revision) — 9.5/10 after one fix
+
+- Delta audited: the tmpl(4) clause. Cancel path untouched (clause lives
+  in schedOk behind tmpl.size == 6; wrong-collateral covenant orders are
+  unmatchable but cancellable). Slot placement proof: covenant order has
+  exactly 1 token, loanTokenOk forces bond.tokens.size == 2 with the
+  loan token at slot 0, so RSN necessarily lands at bond slot 1 —
+  exactly what the bond's poolDataOk reads.
+- **LOW-P3-O1 (confirmed, fixed): covenant bullet.** threshold in
+  [10000,30000] with periodBlocks >= term gave K = 0, zero escrow and
+  nextCheck >= maturity: crank gate dead by height, covenant NEVER
+  tested, cure/acceleration unreachable — maintenance protection that
+  cannot fire, the same trap class the collateral binding closes.
+  **Fix:** covenant branch now also requires tmpl(5) >= CRANK_BOUNTY;
+  with the exact escrow equality in the same chain this forces K >= 1
+  (at least one live checkpoint). Bullets stay valid at threshold 0.
+  Cost: order tree 748 -> 765 B. Pin by adversarial test (covenant-
+  bullet order unmatchable; threshold-0 bullet twin matchable).
+- INFO: ERG-only covenant orders (no token) are unmatchable but
+  cancellable — intended: par-ERG collateral cannot deteriorate, so a
+  covenant on it is dead weight by construction.
+- INFO: COLLATERAL_TOKEN_ID hard-couples this revision to one collateral
+  class (RSN) — matches the pinned single-pool Phase 3 scope; the
+  facility whitelist generalizes later.
+
+## Tree sizes (Phase 3, compile gate 2026-08-04)
+
+| contract | bytes | header |
+|---|---|---|
+| ConformingBond | 1076 | 0x18 (size bit set) |
+| ConformingOrder | 765 | 0x18 (size bit set) |
+
+## Revision 2 re-audit (2026-08-04, post-mainnet finding)
+
+- **LOW-P3-B1 (toolchain, found ON-CHAIN, fixed + gated): eager CSE
+  hoisting of dataInputs reads.** The revision-1 tree crashed every
+  data-input-less spend (repay/top-up/liquidate/covenantOff crank) with
+  ArrayIndexOutOfBounds: the compiler's CSE hoisted the
+  `CONTEXT.dataInputs(0)` node — shared between the guarded poolDataOk
+  val and the healthAt lambda — into an eagerly-evaluated top-level
+  ValDef, above its lazy-&& guards. Found by the happy path's first
+  repay; mechanism CONFIRMED by recovering the bond with a dummy data
+  input attached (tx 43e85ff1). **Fix (revision 2):** all dataInputs
+  reads live in ONE `verdictAt` lambda returning -1/0/1 (invalid pool /
+  unhealthy / healthy); the three application sites use structurally
+  distinct arguments (accelerate subtracts sched(0), pinned 0 for all
+  conforming bonds) so the applications cannot be CSE-merged into a
+  shared eager node. Delta re-audit (audit_verify): semantically
+  equivalent on every path, -1 verdict == old poolDataOk-false, no new
+  suppliable values, keeper still cannot pick the crank branch.
+- **Gate hardened:** three permanent no-data-input reduce probes (repay
+  204,053; covenantOff crank 199,239; top-up 201,712) fail the compile
+  gate on any recurrence. Covenant shapes on revision 2: 199,396-201,970.
+- Standing toolchain rule (Phase 4+ — the coupon path adds verdict call
+  sites): every dataInputs-touching read stays inside the single verdict
+  lambda; every new application site gets a structurally distinct
+  argument; the no-data-input probes stay in the gate.
+
+## Tree sizes (Phase 3 revision 2, compile gate 2026-08-04)
+
+| contract | bytes | header |
+|---|---|---|
+| ConformingBond | 1111 | 0x18 (size bit set) |
+| ConformingOrder | 765 | 0x18 (size bit set) |

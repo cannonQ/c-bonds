@@ -1,7 +1,7 @@
 package bonds
 
 import org.ergoplatform.appkit._
-import org.ergoplatform.sdk.ErgoToken
+import org.ergoplatform.sdk.{ErgoId, ErgoToken}
 import org.ergoplatform.appkit.impl.ErgoTreeContract
 import sigmastate.Values.ErgoTree
 import scala.collection.JavaConverters._
@@ -69,7 +69,8 @@ object TestLib {
     */
   def postOrder(collateral: Long = COLLATERAL, principal: Long = PRINCIPAL,
                 repayment: Long = REPAYMENT, term: Int = TERM_LONG,
-                collTokens: Seq[ErgoToken] = Nil, period: Long = 0L): String =
+                collTokens: Seq[ErgoToken] = Nil, period: Long = 0L,
+                thresholdBps: Long = 0L): String =
     Kit.exec { ctx =>
       val b     = borrower(ctx)
       val bAddr = b.getEip3Addresses.get(0)
@@ -90,16 +91,32 @@ object TestLib {
         .value(collateral + escrow)
         .contract(orderContract)
         .registers(
-          ErgoValue.of(bAddr.getPublicKey),             // R4 borrower SigmaProp
+          ErgoValue.of(bAddr.toErgoContract.getErgoTree.bytes), // R4 borrower script bytes (rev 3)
           ErgoValue.of(principal),                      // R5 principal
           ErgoValue.of(repayment),                      // R6 repayment
           ErgoValue.of(term),                           // R7 term (blocks)
-          ErgoValue.of(Array.emptyByteArray),           // R8 reserved
-          ErgoValue.of(Array[Long](0L, p, 0L, 0L, 0L, escrow)) // R9 template
+          P4.packValue(Seq(Array.emptyByteArray)),      // R8 [cardPin] (empty pin, card-less)
+          ErgoValue.of(Array[Long](0L, p, 0L, 0L, thresholdBps, escrow)) // R9 template
         )
       if (collTokens.nonEmpty) ob = ob.tokens(collTokens: _*)
 
-      val unsigned = tb.boxesToSpend(inputs.asJava).outputs(ob.build())
+      // Token remainder rides on its OWN min-value box so appkit's change
+      // stays token-free — otherwise every order post welds the leftover
+      // RSN onto the ERG change and starves the token-free selector.
+      val inTokens = inputs.flatMap(_.getTokens.asScala)
+        .groupBy(_.getId.toString).values
+        .map(ts => new ErgoToken(ts.head.getId, ts.map(_.getValue.toLong).sum)).toSeq
+      val outMap   = collTokens.groupBy(_.getId.toString).mapValues(_.map(_.getValue.toLong).sum)
+      val leftover = inTokens.flatMap { t =>
+        val rest = t.getValue.toLong - outMap.getOrElse(t.getId.toString, 0L)
+        if (rest > 0) Some(new ErgoToken(t.getId, rest)) else None
+      }
+      val outs =
+        if (leftover.isEmpty) Seq(ob.build())
+        else Seq(ob.build(), tb.outBoxBuilder().value(Kit.MIN_BOX_VALUE)
+          .contract(bAddr.toErgoContract).tokens(leftover: _*).build())
+
+      val unsigned = tb.boxesToSpend(inputs.asJava).outputs(outs: _*)
         .fee(Kit.TX_FEE).sendChangeTo(bAddr).build()
       val signed  = b.sign(unsigned)
       val orderId = signed.getOutputsToSpend.get(0).getId.toString
@@ -139,6 +156,12 @@ object TestLib {
         (maturity - term).toLong + tmpl(1),
         tmpl(4), tmpl(5))
 
+      // Bond R8 pack sized by the covenant shape (rev 3): covenant bonds
+      // carry the resolved poolNFT at index 1, covenant-off just the lender.
+      val r8Pack =
+        if (tmpl(4) != 0L) Seq(lenderScriptTree.bytes, ErgoId.create(Contracts.POOL_NFT).getBytes)
+        else Seq(lenderScriptTree.bytes)
+
       val bondOut = tb.outBoxBuilder()
         .value(orderBox.getValue)
         .contract(bondContract)
@@ -148,7 +171,7 @@ object TestLib {
           orderBox.getRegisters.get(0),                 // R5 borrower (direct register copy)
           ErgoValue.of(repayment),                      // R6 repayment
           ErgoValue.of(maturity),                       // R7 maturity height
-          ErgoValue.of(lenderScriptTree.bytes),         // R8 lender ErgoTree bytes
+          P4.packValue(r8Pack),                         // R8 suffix pack [lender, poolNFT?]
           ErgoValue.of(bondSched)                       // R9 pack
         ).build()
 
@@ -170,8 +193,10 @@ object TestLib {
 
   /** Order + match in one call. */
   def cycle(term: Int, lenderScriptTree: ErgoTree, collTokens: Seq[ErgoToken] = Nil,
-            period: Long = 0L): (String, Int) = {
-    val orderId = postOrder(term = term, collTokens = collTokens, period = period)
+            period: Long = 0L, thresholdBps: Long = 0L, collateral: Long = COLLATERAL,
+            repayment: Long = REPAYMENT): (String, Int) = {
+    val orderId = postOrder(collateral = collateral, repayment = repayment, term = term,
+      collTokens = collTokens, period = period, thresholdBps = thresholdBps)
     matchOrder(orderId, lenderScriptTree, term)
   }
 

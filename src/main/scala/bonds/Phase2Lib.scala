@@ -1,7 +1,7 @@
 package bonds
 
 import org.ergoplatform.appkit._
-import org.ergoplatform.sdk.ErgoToken
+import org.ergoplatform.sdk.{ErgoId, ErgoToken}
 import org.ergoplatform.appkit.impl.ErgoTreeContract
 import scala.collection.JavaConverters._
 
@@ -178,11 +178,11 @@ object P2 {
         .value(value)
         .contract(orderContract)
         .registers(
-          ErgoValue.of(bAddr.getPublicKey),
+          ErgoValue.of(bAddr.toErgoContract.getErgoTree.bytes),
           ErgoValue.of(principal),
           ErgoValue.of(repayment),
           ErgoValue.of(term),
-          ErgoValue.of(Array.emptyByteArray),
+          P4.packValue(Seq(Array.emptyByteArray)),
           ErgoValue.of(template)
         ).build()
       val unsigned = tb.boxesToSpend(funds.asJava).outputs(ob)
@@ -195,15 +195,28 @@ object P2 {
       orderId
     }
 
-  /** Borrower cancels an order, recovering collateral + escrow. */
+  /** Borrower cancels an order, recovering collateral + escrow — and any
+    * token collateral the order carries (Phase 3: covenant orders hold
+    * RSN). Tokens come back on their own min-value box, SEPARATE from
+    * the ERG: a merged recovery output welds ERG onto the token box and
+    * starves the token-free selector a few cycles later (the Phase 2
+    * welding lesson, re-learned on the first C-wall run).
+    */
   def cancelOrder(orderId: String, label: String): Unit =
     Kit.exec { ctx =>
       val b        = TestLib.borrower(ctx); val bAddr = b.getEip3Addresses.get(0)
       val orderBox = ctx.getBoxesById(orderId)(0)
+      // Rev 3: cancel is authorized by borrower-script CO-SPEND (a
+      // borrower-wallet input in the tx), not by signature alone.
+      val coSpend  = Kit.selectBoxes(ctx, bAddr, Kit.TX_FEE)
       val tb       = ctx.newTxBuilder()
-      val out      = tb.outBoxBuilder().value(orderBox.getValue - Kit.TX_FEE)
-        .contract(bAddr.toErgoContract).build()
-      val tx = tb.boxesToSpend(java.util.Arrays.asList(orderBox)).outputs(out)
+      val toks     = orderBox.getTokens.asScala.toSeq
+      val ergOut   = orderBox.getValue - Kit.TX_FEE - (if (toks.nonEmpty) Kit.MIN_BOX_VALUE else 0L)
+      var outs = Seq(tb.outBoxBuilder().value(ergOut).contract(bAddr.toErgoContract).build())
+      if (toks.nonEmpty)
+        outs = outs :+ tb.outBoxBuilder().value(Kit.MIN_BOX_VALUE)
+          .contract(bAddr.toErgoContract).tokens(toks: _*).build()
+      val tx = tb.boxesToSpend((Seq(orderBox) ++ coSpend).asJava).outputs(outs: _*)
         .fee(Kit.TX_FEE).sendChangeTo(bAddr).build()
       val txId = Kit.sendSafe(ctx, b.sign(tx), label)
       Kit.waitConfirmed(txId, label)
@@ -227,6 +240,10 @@ object P2 {
     val tmpl      = TestLib.schedOf(orderBox)
     val sched     = bondSchedOverride.getOrElse(Array[Long](
       tmpl(0), tmpl(1), tmpl(2), (maturity - term).toLong + tmpl(1), tmpl(4), tmpl(5)))
+    // Bond R8 pack sized by the covenant shape (rev 3).
+    val r8Pack =
+      if (tmpl(4) != 0L) Seq(lenderScriptBytes, ErgoId.create(Contracts.POOL_NFT).getBytes)
+      else Seq(lenderScriptBytes)
     val funds = Kit.selectBoxes(ctx, lAddr, principal + Kit.TX_FEE + Kit.MIN_BOX_VALUE)
     val tb    = ctx.newTxBuilder()
     val bondOut = tb.outBoxBuilder()
@@ -238,7 +255,7 @@ object P2 {
         orderBox.getRegisters.get(0),
         ErgoValue.of(repayment),
         ErgoValue.of(maturity),
-        ErgoValue.of(lenderScriptBytes),
+        P4.packValue(r8Pack),
         ErgoValue.of(sched)
       ).build()
     val principalOut = tb.outBoxBuilder().value(principal).contract(bAddr.toErgoContract).build()
