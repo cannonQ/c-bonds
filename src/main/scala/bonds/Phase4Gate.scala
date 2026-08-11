@@ -40,6 +40,10 @@ object Phase4Gate {
     val keeperP   = Kit.noSecretProver(ctx)
     val lenderTreeBytes   = lAddr.toErgoContract.getErgoTree.bytes
     val borrowerTreeBytes = bAddr.toErgoContract.getErgoTree.bytes
+    // Rev 4: bond R5 and R8(0) hold blake2b256 of these trees, never the
+    // trees themselves; the full scripts stay here for every destination.
+    val lenderHash        = P4.h32(lenderTreeBytes)
+    val borrowerHash      = P4.h32(borrowerTreeBytes)
     val poolNftBytes      = ErgoId.create(POOL_NFT).getBytes
 
     // The real pinned pool box.
@@ -63,8 +67,8 @@ object Phase4Gate {
       "probe setup: threshold 20000 must price unhealthy against live reserves")
 
     def covBond(sched: Array[Long]): InputBox =
-      P4.fabBondV3(ctx, sched, Seq(lenderTreeBytes, poolNftBytes),
-        borrowerTreeBytes, bondValue, repayment, maturity, Seq(rsn))
+      P4.fabBondV3(ctx, sched, Seq(lenderHash, poolNftBytes),
+        borrowerHash, bondValue, repayment, maturity, Seq(rsn))
 
     def crankTx(bond: InputBox, r9succ: Array[Long], withPool: Boolean): UnsignedTransaction = {
       val tb = ctx.newTxBuilder()
@@ -98,14 +102,14 @@ object Phase4Gate {
     // ---- 2. NEW path cost probes: coupon, covenant both branches ----
     val schedCoupH = Array[Long](P4.INSTALLMENT, period, 4L, (h - 5).toLong, 15000L, escrow)
     val coupBondH  = covBond(schedCoupH)
-    val coupTxH    = P4.buildCoupon(ctx, coupBondH, P4.honestCouponPlan(coupBondH, healthyBranch = true),
+    val coupTxH    = P4.buildCoupon(ctx, coupBondH, P4.honestCouponPlan(coupBondH, lenderTreeBytes, healthyBranch = true),
       Some(pool), bAddr)
     Jit.record("P4 gate: coupon covenant HEALTHY (local reduce, live pool)",
       borrowerP.reduce(coupTxH, 0).getCost.toLong)
 
     val schedCoupU = Array[Long](P4.INSTALLMENT, period, 4L, (h - 5).toLong, 20000L, escrow)
     val coupBondU  = covBond(schedCoupU)
-    val coupTxU    = P4.buildCoupon(ctx, coupBondU, P4.honestCouponPlan(coupBondU, healthyBranch = false),
+    val coupTxU    = P4.buildCoupon(ctx, coupBondU, P4.honestCouponPlan(coupBondU, lenderTreeBytes, healthyBranch = false),
       Some(pool), bAddr)
     Jit.record("P4 gate: coupon covenant UNHEALTHY->cure (local reduce, live pool)",
       borrowerP.reduce(coupTxU, 0).getCost.toLong)
@@ -140,7 +144,7 @@ object Phase4Gate {
       val tb = ctx.newTxBuilder().preHeader(ctx.createPreHeader().height(preH).build())
       val exit = tb.outBoxBuilder()
         .value(bond.getValue - P4.carveOf(s))
-        .contract(P4.contractFromBytes(P4.lenderTreeBytesOf(bond)))
+        .contract(P4.contractFromBytes(lenderTreeBytes)) // rev 4: R8(0) is a hash
         .tokens(bond.getTokens.asScala.toSeq: _*)
         .registers(ErgoValue.of(bond.getId.getBytes))
         .build()
@@ -166,7 +170,7 @@ object Phase4Gate {
     def blownInstBond(el: Long): InputBox =
       P4.fabBondV3(ctx,
         Array[Long](P4.INSTALLMENT, period, 3L, -((h - 3).toLong), thrX, escrow),
-        Seq(lenderTreeBytes, poolNftBytes), borrowerTreeBytes,
+        Seq(lenderHash, poolNftBytes), borrowerHash,
         escrow + el, repayment, maturity, Seq(rsn))
     require(P3.healthy(pool, lX, amtRSN, repayment, thrX) &&
             !P3.healthy(pool, lX - 1L, amtRSN, repayment, thrX),
@@ -199,8 +203,8 @@ object Phase4Gate {
       borrowerP.reduce(repayTx, 0).getCost.toLong)
 
     val schedOff = Array[Long](0L, period, 0L, (h - 5).toLong, 0L, escrow)
-    val offBond  = P4.fabBondV3(ctx, schedOff, Seq(lenderTreeBytes),
-      borrowerTreeBytes, bondValue, repayment, maturity)
+    val offBond  = P4.fabBondV3(ctx, schedOff, Seq(lenderHash),
+      borrowerHash, bondValue, repayment, maturity)
     val offPack  = Array[Long](0L, period, 0L, (h - 5).toLong + period, 0L, escrow - CRANK_BOUNTY)
     Jit.record("P4 gate: covenantOff crank with NO data input (eager-eval probe)",
       keeperP.reduce(crankTx(offBond, offPack, withPool = false), 0).getCost.toLong)
@@ -224,17 +228,17 @@ object Phase4Gate {
       borrowerP.reduce(topUpTx, 0).getCost.toLong)
 
     val schedCoupOff = Array[Long](P4.INSTALLMENT, period, 4L, (h - 5).toLong, 0L, escrow)
-    val coupOffBond  = P4.fabBondV3(ctx, schedCoupOff, Seq(lenderTreeBytes),
-      borrowerTreeBytes, 35000000L, repayment, maturity)
+    val coupOffBond  = P4.fabBondV3(ctx, schedCoupOff, Seq(lenderHash),
+      borrowerHash, 35000000L, repayment, maturity)
     val coupOffTx    = P4.buildCoupon(ctx, coupOffBond,
-      P4.honestCouponPlan(coupOffBond, healthyBranch = true), None, bAddr)
+      P4.honestCouponPlan(coupOffBond, lenderTreeBytes, healthyBranch = true), None, bAddr)
     Jit.record("P4 gate: covenantOff coupon with NO data input (eager-eval probe)",
       borrowerP.reduce(coupOffTx, 0).getCost.toLong)
 
     // ---- 6. PERMANENT PROBE: nonzero-installment repay (final payment) ----
     val schedFinal = Array[Long](P4.INSTALLMENT, period, 1L, (h + 100).toLong, 0L, 0L)
-    val finalBond  = P4.fabBondV3(ctx, schedFinal, Seq(lenderTreeBytes),
-      borrowerTreeBytes, 20000000L, repayment, maturity)
+    val finalBond  = P4.fabBondV3(ctx, schedFinal, Seq(lenderHash),
+      borrowerHash, 20000000L, repayment, maturity)
     val finalTx = {
       val tb    = ctx.newTxBuilder()
       val funds = Kit.selectBoxes(ctx, bAddr, repayment + Kit.TX_FEE + Kit.MIN_BOX_VALUE)
@@ -318,6 +322,55 @@ object Phase4Gate {
     Jit.record("P4 gate: carded match (1 data input, fabricated card)",
       lenderP.reduce(cardedTx, 0).getCost.toLong)
 
+    // ---- 7b. PERMANENT PROBES (rev 4): the order's ctx-extension surface.
+    // getVar[T] is FALLIBLE in a way dataInputs is not: a var present at
+    // the right index with the WRONG TYPE throws InvalidType where an
+    // absent var returns None (audit A-M3). The reveal lives inside the
+    // twice-applied conformsWith, so if the optimizer ever hoisted that
+    // read out of the lazy match chain, a cancel carrying a mistyped var
+    // would stop being a cancel and start being a brick. Both shapes must
+    // reduce cleanly: the cancel arm never looks at var 0.
+    val varOrd = fabOrder(Array.emptyByteArray, bulletTmpl, TestLib.COLLATERAL)
+    def cancelWithInput(ord: InputBox): UnsignedTransaction = {
+      val tb      = ctx.newTxBuilder()
+      val coSpend = Kit.selectBoxes(ctx, bAddr, Kit.TX_FEE)
+      val out = tb.outBoxBuilder()
+        .value(ord.getValue - Kit.TX_FEE)
+        .contract(bAddr.toErgoContract).build()
+      tb.boxesToSpend((Seq(ord) ++ coSpend).asJava)
+        .outputs(out).fee(Kit.TX_FEE).sendChangeTo(bAddr).build()
+    }
+    Jit.record("P4 gate: cancel with WRONG-TYPED ctx var 0 (Long, not Coll[Byte]) — must still cancel",
+      borrowerP.reduce(cancelWithInput(
+        varOrd.withContextVars(new ContextVar(0.toByte, ErgoValue.of(42L)))), 0).getCost.toLong)
+    Jit.record("P4 gate: cancel with the honest var-0 SHAPE attached (control)",
+      borrowerP.reduce(cancelWithInput(
+        varOrd.withContextVars(new ContextVar(0.toByte, ErgoValue.of(lenderTreeBytes)))), 0).getCost.toLong)
+
+    // Cancel BATCHED with a match in one transaction: the cancelled order
+    // is INPUTS(1), so its matchOk gets PAST bondScriptOk (OUTPUTS(0) is a
+    // real bond box) and stops at INPUTS(0).id == SELF.id — the deepest
+    // any non-match spend gets into the match chain. It must still fall
+    // through to the cancel arm: the loan token minted for the OTHER order
+    // carries a different id, so noLoanTokenMinted holds.
+    // The two fabricated orders differ in value so they are distinct boxes
+    // (a fabrication carrying the same id twice is not a transaction).
+    val batchOrdA = fabOrder(Array.emptyByteArray, bulletTmpl, TestLib.COLLATERAL)
+    val batchOrdB = fabOrder(Array.emptyByteArray, bulletTmpl, TestLib.COLLATERAL + 1000000L)
+    val batchTx = {
+      val matchOnly = P4.buildMatchV3(ctx, batchOrdA, lenderTreeBytes, 720, None)
+      val tb    = ctx.newTxBuilder()
+      val funds = Kit.selectBoxes(ctx, bAddr, TestLib.PRINCIPAL + Kit.TX_FEE + Kit.MIN_BOX_VALUE)
+      val recovery = tb.outBoxBuilder()
+        .value(batchOrdB.getValue - Kit.TX_FEE)
+        .contract(bAddr.toErgoContract).build()
+      tb.boxesToSpend((Seq(P4.orderWithMatchVars(batchOrdA, lenderTreeBytes), batchOrdB) ++ funds).asJava)
+        .outputs(matchOnly.getOutputs.get(0), matchOnly.getOutputs.get(1), recovery)
+        .fee(Kit.TX_FEE).sendChangeTo(bAddr).build()
+    }
+    Jit.record("P4 gate: cancel BATCHED with a match (order past bondScriptOk, stops at INPUTS(0).id)",
+      borrowerP.reduce(batchTx, 0).getCost.toLong)
+
     // ---- 8. borrowerAuth eager-evaluation safety ----
     // Signatureless paths carry ZERO borrower-script inputs; if the
     // INPUTS.exists were hoisted in a crashing form, these reduces die.
@@ -330,10 +383,10 @@ object Phase4Gate {
     // ---- 9. New-path cost rows: missed-accel, hooked liquidation,
     // plain liquidation, refuel, attestation stub ----
     val schedMissed = Array[Long](P4.INSTALLMENT, period, 3L, (h - 15).toLong, 0L, escrow)
-    val missedBond  = P4.fabBondV3(ctx, schedMissed, Seq(lenderTreeBytes),
-      borrowerTreeBytes, 35000000L, repayment, maturity)
+    val missedBond  = P4.fabBondV3(ctx, schedMissed, Seq(lenderHash),
+      borrowerHash, 35000000L, repayment, maturity)
     val missedTx = P4.buildMissedAccel(ctx, missedBond,
-      P4.honestMissedAccelPlan(missedBond), bAddr, preHeaderHeight = Some(h))
+      P4.honestMissedAccelPlan(missedBond, lenderTreeBytes), bAddr, preHeaderHeight = Some(h))
     require((h - 15).toLong + GRACE_BLOCKS <= h.toLong, "probe setup: deadline+grace must be past")
     Jit.record("P4 gate: missed-payment acceleration (local reduce, no data input)",
       keeperP.reduce(missedTx, 0).getCost.toLong)
@@ -342,7 +395,7 @@ object Phase4Gate {
     val hookHash   = scorex.crypto.hash.Blake2b256(vaultBytes)
     val hookedBond = P4.fabBondV3(ctx,
       Array[Long](0L, period, 0L, (h + 100).toLong, 15000L, escrow),
-      Seq(lenderTreeBytes, poolNftBytes, hookHash), borrowerTreeBytes,
+      Seq(lenderHash, poolNftBytes, hookHash), borrowerHash,
       bondValue, repayment, maturity, Seq(rsn))
     val hookedTx = P4.buildHookedLiquidation(ctx, hookedBond, vaultBytes, bAddr,
       preHeaderHeight = Some(maturity + 1))
@@ -380,8 +433,8 @@ object Phase4Gate {
     val schedAtt = Array[Long](0L, period, 0L, (h - 5).toLong, 15000L, escrow,
       CRANK_BOUNTY, GRACE_BLOCKS, LIQ_CARVEOUT, HAIRCUT_KEEP, 1L)
     val attBond = P4.fabBondV3(ctx, schedAtt,
-      Seq(lenderTreeBytes, poolNftBytes, Array.emptyByteArray, attHash),
-      borrowerTreeBytes, bondValue, repayment, maturity, Seq(rsn))
+      Seq(lenderHash, poolNftBytes, Array.emptyByteArray, attHash),
+      borrowerHash, bondValue, repayment, maturity, Seq(rsn))
     val attBox  = P4.fabAttesterBox(ctx, attTree,
       ErgoId.create(P4.FAKE_LOAN).getBytes, (h - 5).toLong, pass = true)
     val attAdvPack = Array[Long](0L, period, 0L, (h - 5).toLong + period, 15000L, escrow - CRANK_BOUNTY,

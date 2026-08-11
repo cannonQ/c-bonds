@@ -178,10 +178,10 @@ object A6_ForgedBondProvenance {
         .tokens(new ErgoToken(fake, 1L))
         .registers(
           ErgoValue.of(fake.getBytes),                  // R4 mimics an order id
-          ErgoValue.of(kTree.bytes),                    // R5 forger as borrower (script bytes, rev 3)
+          ErgoValue.of(P4.h32(kTree.bytes)),            // R5 forger as borrower (script HASH, rev 4)
           ErgoValue.of(1L),                             // R6 token repayment
           ErgoValue.of(h + 10000),                      // R7
-          P4.packValue(Seq(kTree.bytes)),               // R8 forger as lender (pack, covenant-off)
+          P4.packValue(Seq(P4.h32(kTree.bytes))),       // R8 forger as lender (hash pack, covenant-off)
           ErgoValue.of(Array[Long](0L, 0L, 0L, (h + 10000).toLong, 0L, 0L))
         ).build()
       val unsigned = tb.boxesToSpend(funds.asJava).outputs(forged)
@@ -318,9 +318,12 @@ object A9_LoanTokenOverMint {
         .contract(bondContract)
         .tokens(new ErgoToken(orderBox.getId, 1L)) // bond holds exactly 1
         .registers(
-          ErgoValue.of(orderBox.getId.getBytes), orderBox.getRegisters.get(0),
+          // Rev 4: R5 = blake2b256(order R4 borrower bytes), R8(0) = the
+          // lender script hash; the full lender tree rides ctx-ext var 0.
+          ErgoValue.of(orderBox.getId.getBytes),
+          ErgoValue.of(P4.h32(P4.borrowerBytesOf(orderBox, 0))),
           ErgoValue.of(repayment), ErgoValue.of(maturity),
-          P4.packValue(Seq(vault.bytes)),
+          P4.packValue(Seq(P4.h32(vault.bytes))),
           ErgoValue.of(Array[Long](tmpl(0), tmpl(1), tmpl(2),
             (maturity - TestLib.TERM_LONG).toLong + tmpl(1), tmpl(4), tmpl(5)))
         ).build()
@@ -329,7 +332,10 @@ object A9_LoanTokenOverMint {
       val extraOut = tb.outBoxBuilder().value(Kit.MIN_BOX_VALUE).contract(lAddr.toErgoContract)
         .tokens(new ErgoToken(orderBox.getId, 1L)).build()
 
-      val unsigned = tb.boxesToSpend((Seq(orderBox) ++ funds).asJava)
+      // The reveal var is attached so loanTokenSupplyOne is the ONLY
+      // failing conjunct (wrong-reason discipline).
+      val unsigned = tb.boxesToSpend(
+          (Seq(P4.orderWithMatchVars(orderBox, vault.bytes)) ++ funds).asJava)
         .outputs(bondOut, principalOut, extraOut)
         .fee(Kit.TX_FEE).sendChangeTo(lAddr).build()
       Kit.expectRejected("A9 match minting a second loan-token unit") { l.sign(unsigned) }

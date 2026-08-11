@@ -111,7 +111,7 @@ object RunPhase3 {
 
     println("--- T-P3-4: acceleration (C, signatureless early default) ---")
     Kit.waitForHeight(deadlineC + 2)
-    val exitC = P3.doAccelerate(bondC1, "P3 accelerate (C, keeper)")
+    val exitC = P3.doAccelerate(bondC1, vault.bytes, "P3 accelerate (C, keeper)")
 
     // -- bond B repay: Phase 1 exit wall across the covenant chain ------
     println("--- T-P3-5: repay B (exit wall across covenant successors) ---")

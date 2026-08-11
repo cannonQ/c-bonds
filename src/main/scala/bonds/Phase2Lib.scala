@@ -240,10 +240,14 @@ object P2 {
     val tmpl      = TestLib.schedOf(orderBox)
     val sched     = bondSchedOverride.getOrElse(Array[Long](
       tmpl(0), tmpl(1), tmpl(2), (maturity - term).toLong + tmpl(1), tmpl(4), tmpl(5)))
-    // Bond R8 pack sized by the covenant shape (rev 3).
+    // Bond R8 pack sized by the covenant shape (rev 3); rev 4 puts the
+    // blake2b256 of the lender tree at element 0 and reveals the preimage
+    // as ctx-ext var 0 on the order input. R5 likewise hashes the order's
+    // borrower bytes instead of copying the register.
+    val lenderHash = P4.h32(lenderScriptBytes)
     val r8Pack =
-      if (tmpl(4) != 0L) Seq(lenderScriptBytes, ErgoId.create(Contracts.POOL_NFT).getBytes)
-      else Seq(lenderScriptBytes)
+      if (tmpl(4) != 0L) Seq(lenderHash, ErgoId.create(Contracts.POOL_NFT).getBytes)
+      else Seq(lenderHash)
     val funds = Kit.selectBoxes(ctx, lAddr, principal + Kit.TX_FEE + Kit.MIN_BOX_VALUE)
     val tb    = ctx.newTxBuilder()
     val bondOut = tb.outBoxBuilder()
@@ -252,14 +256,14 @@ object P2 {
       .tokens((new ErgoToken(orderBox.getId, 1L) +: orderBox.getTokens.asScala.toSeq): _*)
       .registers(
         ErgoValue.of(orderBox.getId.getBytes),
-        orderBox.getRegisters.get(0),
+        ErgoValue.of(P4.h32(P4.borrowerBytesOf(orderBox, 0))),
         ErgoValue.of(repayment),
         ErgoValue.of(maturity),
         P4.packValue(r8Pack),
         ErgoValue.of(sched)
       ).build()
     val principalOut = tb.outBoxBuilder().value(principal).contract(bAddr.toErgoContract).build()
-    tb.boxesToSpend((Seq(orderBox) ++ funds).asJava)
+    tb.boxesToSpend((Seq(P4.orderWithMatchVars(orderBox, lenderScriptBytes)) ++ funds).asJava)
       .outputs(bondOut, principalOut)
       .fee(Kit.TX_FEE).sendChangeTo(lAddr).build()
   }

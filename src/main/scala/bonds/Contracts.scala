@@ -3,8 +3,8 @@ package bonds
 import org.ergoplatform.appkit._
 import org.ergoplatform.appkit.impl.ErgoTreeContract
 import org.ergoplatform.sdk.ErgoId
-import sigmastate.Values.ErgoTree
-import sigmastate.crypto.DLogProtocol.ProveDlog
+import sigma.ast.ErgoTree
+import sigma.data.ProveDlog
 
 /** Contract compilation with the compiled-constant wiring. The order
   * contract pins the bond contract one-way by blake2b256 of its sized tree
@@ -43,6 +43,12 @@ object Contracts {
     * no conforming covenant bond can exist with unpriceable collateral. */
   val COLLATERAL_TOKEN_ID: String =
     "8b08cdd5449a9592a9e79711d7d79249d7a03c535d17efaee83e216e80a44c4b"
+  /** Rev 4 (B-M1b): blake2b256 of the Spectrum N2T pool ErgoTree — the
+    * verdict's data input must RUN this script, not merely carry a
+    * pool-shaped NFT. Sourced from the live pinned pool box (412-byte
+    * tree, box 4b9e1580…) 2026-08-10. */
+  val SPECTRUM_POOL_HASH: String =
+    "99f30ad579a2c98ad31b432676627fcd9e303d43c06e898725f6155d8ac40aa9"
   /** Cure window in blocks after a failed checkpoint (deadline =
     * checkpoint + GRACE_BLOCKS, grid-anchored). Test-scale sizing (~20
     * min); real sizing is a W4 economics item like CRANK_BOUNTY. */
@@ -58,7 +64,8 @@ object Contracts {
     * coupon output clear of min-box-value. Test-scale; W4 re-sizes. */
   val MIN_COUPON: Long = 5000000L
 
-  private def hexBytes(s: String): Array[Byte] = ErgoId.create(s).getBytes
+  private def hexBytes(s: String): sigma.Coll[Byte] =
+    sigma.Colls.fromArray(ErgoId.create(s).getBytes)
 
   /** Escrow a conforming order must carry: one bounty per interior
     * checkpoint, K = (term - 1) / period exactly (mirrors schedOk). */
@@ -76,6 +83,7 @@ object Contracts {
         .item("CRANK_BOUNTY", CRANK_BOUNTY)
         .item("GRACE_BLOCKS", GRACE_BLOCKS)
         .item("HAIRCUT_KEEP", HAIRCUT_KEEP)
+        .item("SPECTRUM_POOL_HASH", hexBytes(SPECTRUM_POOL_HASH))
         .build())
 
   /** Rev 3: the order gains the sentinel-resolution defaults (the card
@@ -83,9 +91,11 @@ object Contracts {
     * protocol floors a card may raise, never lower. */
   def order(ctx: BlockchainContext): (ErgoTree, ErgoTreeContract) = {
     val (bondTree, _) = bond(ctx)
+    val (cardTree, _) = termsBox(ctx)
     Kit.compile(ctx, Kit.readContract("ConformingOrder.es"),
       ConstantsBuilder.create()
-        .item("BOND_SCRIPT_HASH", scorex.crypto.hash.Blake2b256(bondTree.bytes))
+        .item("BOND_SCRIPT_HASH", sigma.Colls.fromArray(scorex.crypto.hash.Blake2b256(bondTree.bytes).asInstanceOf[Array[Byte]]))
+        .item("TERMS_BOX_HASH", sigma.Colls.fromArray(scorex.crypto.hash.Blake2b256(cardTree.bytes).asInstanceOf[Array[Byte]]))
         .item("MATURITY_TOL", MATURITY_TOL)
         .item("MIN_ORDER_VALUE", MIN_ORDER_VALUE)
         .item("CRANK_BOUNTY", CRANK_BOUNTY)

@@ -1,6 +1,14 @@
 {
   // =====================================================================
-  // Conforming Open Order — rev 3 (script borrower · card pin · Phase 4)
+  // Conforming Open Order — rev 4 (script actors by hash + reveal-at-match)
+  //
+  // Rev 4 deltas (REV4-DECISIONS D1-D3 + audit fixes): bond R5 gets
+  // blake2b256(borrower R4 bytes); bond R8(0) must be a 32-byte lender
+  // hash; the match REQUIRES ctx-ext vars on THIS order input — var 0 =
+  // full lender script (always), var 1 = full hook script (iff pinned) —
+  // each verified against its hash. Card numerics: flagWord gated 0,
+  // carveout/haircutKeep capped at compiled outer bounds, byte fields
+  // 32-or-empty. Cancel co-spend excludes SELF.
   //
   // Borrower-side loan request. The borrower locks collateral here with
   // the requested terms; any funder (key or contract) matches it by
@@ -127,7 +135,7 @@
     bondBox.R4[Coll[Byte]].isDefined &&
     bondBox.R4[Coll[Byte]].get == SELF.id &&
     bondBox.R5[Coll[Byte]].isDefined &&
-    bondBox.R5[Coll[Byte]].get == borrower &&
+    bondBox.R5[Coll[Byte]].get == blake2b256(borrower) &&
     bondBox.R6[Long].isDefined &&
     bondBox.R6[Long].get == repayment
 
@@ -195,12 +203,27 @@
       s == (if (carded) base.append(Coll(n(0), n(1), n(2), n(3))) else base)
     } &&
     {
+      // Rev 4 (D1/D3): br8(0) is the 32-byte blake2b256 of the funder's
+      // lender script, and the match must REVEAL the preimage via ctx-ext
+      // var 0 on this order input (var 1 for the hook when pinned) — a
+      // hash nobody can open would leave the borrower unable to build any
+      // lender payment (forced default, bricked exits) or the lender
+      // without a post-maturity claim. Reveal proves the preimage EXISTS
+      // on-chain, not that it is a spendable script (funder/borrower
+      // self-burn stays the documented posture). getVar is ctx-ext, not a
+      // data input — zero D-I surface (same class as the bond's liq hook).
       val br8   = bondBox.R8[Coll[Coll[Byte]]].get
       val covOn = tmpl(4) != 0L
+      val lv    = getVar[Coll[Byte]](0)
       br8.size >= 1 &&
-      br8(0).size > 0 &&
+      br8(0).size == 32 &&
+      lv.isDefined &&
+      blake2b256(lv.get) == br8(0) &&
       (if (hookPresent)
-        covOn && br8.size == 3 && br8(1) == poolNft && br8(2) == hookHash
+        covOn && br8.size == 3 && br8(1) == poolNft && br8(2) == hookHash && {
+          val hv = getVar[Coll[Byte]](1)
+          hv.isDefined && blake2b256(hv.get) == hookHash
+        }
       else if (covOn)
         br8.size == 2 && br8(1) == poolNft
       else
@@ -224,6 +247,11 @@
       card.tokens.size >= 1 &&
       card.tokens(0)._1 == cardPin &&
       card.tokens(0)._2 == 1L &&
+      // Rev-4 audit (A-M5, user-approved): the pinned NFT proves WHICH
+      // box; this proves it is governed by the refuel-only card script —
+      // a look-alike box holding the NFT under a mutable guard cannot
+      // reprice a posted order.
+      blake2b256(card.propositionBytes) == TERMS_BOX_HASH &&
       card.R7[Coll[Long]].isDefined &&
       card.R8[Coll[Coll[Byte]]].isDefined &&
       {
@@ -232,19 +260,38 @@
         c7.size >= 11 &&
         c8.size >= 2 &&
         c7(9) == 0L &&
+        // Rev-4 audit: flagWord gated to zero like attestationType — no
+        // reserved bit ships matchable before its semantics exist.
+        c7(10) == 0L &&
+        // Rev-4 audit: card byte fields are token ids — 32 bytes or the
+        // empty sentinel, nothing else.
+        (c8(0).size == 0 || c8(0).size == 32) &&
+        (c8(1).size == 0 || c8(1).size == 32) &&
         // Free-set card numerics must be non-negative (EKB rev-3 F2): a
         // negative bounty would flip the escrow-exactness sign and
         // inflate the net-of-escrow collateral floor; negative grace
         // would arm instant acceleration. Sentinel 0 = default; the
         // clamped/max()ed fields below are sign-safe by construction.
+        // Rev-4 (A-H1/B-H2, user direction): a hook is legal ONLY if the
+        // pinned card lists its hash (card R8 indices 4+ = blessed hooks,
+        // frozen by the refuel-only guard). The hook and the terms travel
+        // as one immutable, auditable bundle — no free-floating hook
+        // hashes. Card-less orders cannot carry hooks at all (matchOk).
+        (!hookPresent || c8.slice(4, c8.size).exists { (h: Coll[Byte]) =>
+          h == hookHash
+        }) &&
         c7(0) >= 0L && c7(1) >= 0L && c7(2) >= 0L && c7(3) >= 0L &&
         {
           val bounty  = if (c7(0) == 0L) CRANK_BOUNTY else c7(0)
           val grace   = if (c7(1) == 0L) GRACE_BLOCKS else c7(1)
-          val carve   = if (c7(2) == 0L) LIQ_CARVEOUT else c7(2)
-          val haircut = if (c7(3) == 0L) HAIRCUT_KEEP else c7(3)
+          // Rev-4 audit: carveout and haircutKeep are OUTER bounds a card
+          // may tighten, never loosen — cap at the compiled values (an
+          // uncapped carveout lets a liquidator strip the collateral; an
+          // inflated haircutKeep nullifies the covenant).
+          val carve   = if (c7(2) == 0L || c7(2) > LIQ_CARVEOUT) LIQ_CARVEOUT else c7(2)
+          val haircut = if (c7(3) == 0L || c7(3) > HAIRCUT_KEEP) HAIRCUT_KEEP else c7(3)
           val thrMin  = if (c7(4) < 10000L) 10000L else c7(4)
-          val thrMax  = if (c7(5) == 0L) 30000L
+          val thrMax  = if (c7(5) <= 0L) 30000L
                         else if (c7(5) > 30000L) 30000L else c7(5)
           val minOrd  = if (c7(6) < MIN_ORDER_VALUE) MIN_ORDER_VALUE else c7(6)
           val minPer  = if (c7(7) < MIN_PERIOD) MIN_PERIOD else c7(7)
@@ -282,6 +329,7 @@
     (if (hasPin)
       cardOk(true)
     else
+      !hookPresent &&
       conformsWith((Coll(CRANK_BOUNTY, GRACE_BLOCKS, LIQ_CARVEOUT, HAIRCUT_KEEP,
         10000L, 30000L, MIN_ORDER_VALUE, MIN_PERIOD, MIN_COUPON, 0L),
         (POOL_NFT, COLLATERAL_TOKEN_ID))))
@@ -289,7 +337,11 @@
   // Cancel: borrower-script co-spend (a contract borrower satisfies its
   // own script on a co-spent box; a P2PK borrower signs one of their
   // boxes), conjoined with the untouched HIGH-O1 mint guard.
-  val borrowerAuth = INPUTS.exists { (b: Box) => b.propositionBytes == borrower }
+  // Rev-4 audit: SELF excluded — an order whose R4 equals the order tree
+  // itself must not self-authorize its own cancel (anyone-spendable).
+  val borrowerAuth = INPUTS.exists { (b: Box) =>
+    b.propositionBytes == borrower && b.id != SELF.id
+  }
 
   val noLoanTokenMinted = OUTPUTS.forall { (o: Box) =>
     o.tokens.forall { (t: (Coll[Byte], Long)) => t._1 != SELF.id }

@@ -47,13 +47,15 @@ object Phase3Suite {
       ob.tokens(new ErgoToken(FAKE_LOAN, 1L), new ErgoToken(P3.RSN_ID, rsnAmt))
     else
       ob.tokens(new ErgoToken(FAKE_LOAN, 1L))
-    // Rev 3: R5 borrower script bytes; R8 pack sized by the covenant shape.
+    // Rev 3: R8 pack sized by the covenant shape. Rev 4: R5 and R8(0)
+    // hold blake2b256 of the borrower / lender trees, not the trees —
+    // `lenderTree` stays the FULL script (every C-wall exit destination).
     val r8Pack =
-      if (sched(4) != 0L) Seq(lenderTree, ErgoId.create(Contracts.POOL_NFT).getBytes)
-      else Seq(lenderTree)
+      if (sched(4) != 0L) Seq(P4.h32(lenderTree), ErgoId.create(Contracts.POOL_NFT).getBytes)
+      else Seq(P4.h32(lenderTree))
     ob.registers(
         ErgoValue.of(FAKE_LOAN.getBytes),
-        ErgoValue.of(bAddr.toErgoContract.getErgoTree.bytes),
+        ErgoValue.of(P4.h32(bAddr.toErgoContract.getErgoTree.bytes)),
         ErgoValue.of(REPAY),
         ErgoValue.of(maturity),
         P4.packValue(r8Pack),
@@ -117,7 +119,7 @@ object Phase3Suite {
   }
 
   def buildAccel(ctx: BlockchainContext, bond: InputBox, pool: Option[InputBox],
-                 destTree: sigmastate.Values.ErgoTree, exitValue: Long, preH: Int,
+                 destTree: sigma.ast.ErgoTree, exitValue: Long, preH: Int,
                  receiptR4: Option[Array[Byte]], tokens: Seq[ErgoToken],
                  payTo: Address,
                  keeperTokens: Seq[ErgoToken] = Nil): UnsignedTransaction = {

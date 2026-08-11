@@ -82,7 +82,7 @@ object RunPhase4 {
     // coupon is accepted and the successor enters cure encoding
     // (payment taken, sched(2) decremented, sched(3) flipped negative).
     Kit.waitForHeight(h1Grid1 + 2)
-    val h1Bond1 = P4.doCoupon(h1Bond0, "H1 coupon 1 (unhealthy->cure)",
+    val h1Bond1 = P4.doCoupon(h1Bond0, lenderTreeBytes, "H1 coupon 1 (unhealthy->cure)",
       expectHealthy = false)
 
     // H1 cure: computed live — enough ergLeg to clear the threshold
@@ -100,16 +100,16 @@ object RunPhase4 {
 
     // H2 coupon 1 (its grid runs ~2 blocks behind H1's).
     Kit.waitForHeight(h2Grid1 + 2)
-    val h2Bond1 = P4.doCoupon(h2Bond0, "H2 coupon 1")
+    val h2Bond1 = P4.doCoupon(h2Bond0, lenderTreeBytes, "H2 coupon 1")
 
     // H1 coupon 2 — healthy after the cure.
     Kit.waitForHeight(h1Grid1 + H1_PERIOD.toInt + 2)
-    val h1Bond2b = P4.doCoupon(h1Bond2, "H1 coupon 2", expectHealthy = true)
+    val h1Bond2b = P4.doCoupon(h1Bond2, lenderTreeBytes, "H1 coupon 2", expectHealthy = true)
 
     // H1 coupon 3 — paid by the KEEPER wallet: the on-chain third-party
     // liveness proof (D15; decision 1a).
     Kit.waitForHeight(h1Grid1 + 2 * H1_PERIOD.toInt + 2)
-    val h1Bond3 = P4.doCoupon(h1Bond2b, "H1 coupon 3 (third-party keeper, D15)",
+    val h1Bond3 = P4.doCoupon(h1Bond2b, lenderTreeBytes, "H1 coupon 3 (third-party keeper, D15)",
       proverOf = TestLib.keeper, expectHealthy = true)
 
     // H1 final payment: sched(2) == 1 — the repay exit IS the release.
@@ -120,7 +120,7 @@ object RunPhase4 {
     // H2: coupon #2 is MISSED — nothing to do but wait out the grace.
     // Deadline = checkpoint 2 = grid1 + period; accel opens at +grace.
     Kit.waitForHeight(h2Grid1 + H2_PERIOD.toInt + GRACE_BLOCKS.toInt + 2)
-    val h2Exit = P4.doMissedAccel(h2Bond1, "H2 missed-accel (grace expiry)")
+    val h2Exit = P4.doMissedAccel(h2Bond1, lenderTreeBytes, "H2 missed-accel (grace expiry)")
     println(s"H2 complete: exit $h2Exit")
 
     // ---- D4: the race, on its own bond ----
@@ -140,9 +140,9 @@ object RunPhase4 {
       val bAddr  = b.getEip3Addresses.get(0)
       val kAddr  = k.getEip3Addresses.get(0)
       val coupon = b.sign(P4.buildCoupon(ctx, bond,
-        P4.honestCouponPlan(bond, healthyBranch = true), None, bAddr))
+        P4.honestCouponPlan(bond, lenderTreeBytes, healthyBranch = true), None, bAddr))
       val accel  = k.sign(P4.buildMissedAccel(ctx, bond,
-        P4.honestMissedAccelPlan(bond), kAddr))
+        P4.honestMissedAccelPlan(bond, lenderTreeBytes), kAddr))
       require(accel.getSignedInputs.size == 1, "D4 accel must be self-funding")
       Kit.sendSafe(ctx, coupon, "D4 race coupon (late)")
       try { Kit.sendSafe(ctx, accel, "D4 race missed-accel") }
@@ -167,14 +167,14 @@ object RunPhase4 {
 
     // Cleanup: if the coupon won, the schedule is live again — pay it
     // down (checkpoints are all in the past, so coupons chain
-    // immediately) and take the final repay exit to the R8(0) lender
-    // script.
+    // immediately) and take the final repay exit to the lender script
+    // (rev 4: R8(0) is only its hash — the tree comes from the harness).
     if (winner == "coupon") {
       println("=== D4 cleanup: coupon won — pay down the schedule ===")
       var cur = succIfCoupon
       var s   = Kit.exec { ctx => TestLib.schedOf(ctx.getBoxesById(cur)(0)) }
       while (s(2) > 1L) {
-        cur = P4.doCoupon(cur, s"D4 cleanup coupon (payments ${s(2)})")
+        cur = P4.doCoupon(cur, lenderTreeBytes, s"D4 cleanup coupon (payments ${s(2)})")
         s   = Kit.exec { ctx => TestLib.schedOf(ctx.getBoxesById(cur)(0)) }
       }
       val d4Exit = TestLib.doExit(cur, lenderP2pkTree, asRepay = true,

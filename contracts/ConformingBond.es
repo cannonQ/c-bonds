@@ -1,6 +1,10 @@
 {
   // =====================================================================
-  // Conforming Bond — rev 3 (script borrower · card layout · instalments)
+  // Conforming Bond — rev 4 (script actors by HASH; see rev-4 note at the
+  // register reads: R5 and R8(0) hold blake2b256 hashes, all lender
+  // payments verified by hashing the output's propositionBytes, borrower
+  // co-spend verified by hashing input propositionBytes. Layout otherwise
+  // rev 3:)
   //
   // Phase 1 core (repay/liquidate), Phase 2 successor machinery
   // (crank/top-up) and Phase 3 covenant machinery (verdict crank, cure,
@@ -31,12 +35,14 @@
   // Registers (layout locked, REV3-LAYOUT.md; suffix packs opt-in by
   // size, dense, append-only):
   //   R4: Coll[Byte]       originating order box id (== loan token id)
-  //   R5: Coll[Byte]       borrower ErgoTree bytes
+  //   R5: Coll[Byte]       blake2b256(borrower ErgoTree) — rev 4
   //   R6: Long             repayment amount, nanoERG
   //   R7: Int              maturity height
-  //   R8: Coll[Coll[Byte]] [lenderScript]                    plain
-  //                        [lenderScript, poolNFT]           covenant
-  //                        [lenderScript, poolNFT, liqHookHash]
+  //   R8: Coll[Coll[Byte]] [lenderHash]                      plain
+  //                        [lenderHash, poolNFT]             covenant
+  //                        [lenderHash, poolNFT, liqHookHash]
+  //                        (lenderHash = blake2b256 of lender ErgoTree,
+  //                        rev 4; preimage revealed at match, order var 0)
   //                                            covenant + custom hook
   //                        (index 3, attesterScriptHash, exists only on
   //                        fabricated nonzero-type bonds — see below)
@@ -124,8 +130,13 @@
   // every data-input-less shape plus borrowerAuth eager safety.
   // =====================================================================
 
-  val r8pack       = SELF.R8[Coll[Coll[Byte]]].get
-  val lenderScript = r8pack(0)
+  // Rev 4 (external review, REV4-DECISIONS D1/D2): R8(0) and R5 hold
+  // blake2b256 HASHES of the lender/borrower ErgoTrees, not the bytes —
+  // bond box size is independent of counterparty script size (4KB box
+  // cap). Preimages are revealed at match (order-side ctx vars), so
+  // every destination is constructible from chain history.
+  val r8pack     = SELF.R8[Coll[Coll[Byte]]].get
+  val lenderHash = r8pack(0)
   val repayment    = SELF.R6[Long].get
   val maturity     = SELF.R7[Int].get
   val borrower     = SELF.R5[Coll[Byte]].get
@@ -145,7 +156,7 @@
   // conforming rev-3 bond (the order enforces it).
   val attestType  = if (sched.size >= 11) sched(10) else 0L
 
-  val toLender = exitBox.propositionBytes == lenderScript
+  val toLender = blake2b256(exitBox.propositionBytes) == lenderHash
 
   val receiptOk =
     exitBox.R4[Coll[Byte]].isDefined &&
@@ -159,11 +170,29 @@
   // 4); bullets (sched(2) == 0) pass unchanged. No prepayment for
   // installment bonds: the gate is reachable only by servicing every
   // interior coupon (spec negative D3).
+  // Rev-4 (B-M3, approved): every collateral token must land in an output
+  // guarded by the borrower script — a loose DAO-borrower script co-spent
+  // in a foreign tx can no longer have its collateral routed elsewhere as
+  // a side effect of "repaying" it. ERG residual stays free (the borrower
+  // script authorized the tx; directing ERG is its own duty). tokens(0)
+  // is the loan token (rides to the lender receipt); slice(1,_) is the
+  // collateral. Empty slice (ERG-only bonds) is vacuously true.
+  val collateralToBorrower =
+    SELF.tokens.slice(1, SELF.tokens.size).forall { (t: (Coll[Byte], Long)) =>
+      OUTPUTS.exists { (o: Box) =>
+        blake2b256(o.propositionBytes) == borrower &&
+        o.tokens.exists { (ot: (Coll[Byte], Long)) =>
+          ot._1 == t._1 && ot._2 >= t._2
+        }
+      }
+    }
+
   val repayOk =
     sched(2) <= 1L &&
     toLender &&
     exitBox.value >= repayment &&
-    receiptOk
+    receiptOk &&
+    collateralToBorrower
 
   val allTokensDelivered = SELF.tokens.forall { (t: (Coll[Byte], Long)) =>
     exitBox.tokens.exists { (o: (Coll[Byte], Long)) =>
@@ -244,7 +273,12 @@
       if (attestType == 0L) {
         if (r8pack.size >= 2) {
           val pool = CONTEXT.dataInputs(0)
+          // Rev-4 (B-M1b, approved): the price source must RUN the real
+          // Spectrum N2T pool script, not merely carry a pool-shaped NFT —
+          // a self-minted NFT on a fake 3-token box can no longer feed the
+          // verdict.
           if (pool.tokens.size == 3 &&
+              blake2b256(pool.propositionBytes) == SPECTRUM_POOL_HASH &&
               pool.tokens(0)._1 == r8pack(1) &&
               pool.R4[Int].isDefined &&
               q._2.tokens.size >= 2 &&
@@ -332,7 +366,7 @@
     OUTPUTS.size >= 2 &&
     {
       val inst = OUTPUTS(1)
-      inst.propositionBytes == lenderScript &&
+      blake2b256(inst.propositionBytes) == lenderHash &&
       inst.value >= sched(0) &&
       inst.R4[Coll[Byte]].isDefined &&
       inst.R4[Coll[Byte]].get == SELF.id
@@ -430,7 +464,7 @@
   // satisfying its script (a P2PK borrower signs; a contract borrower
   // satisfies its own logic) — the tx-level validity is the signature.
   // Reads only INPUTS: eager-hoist safe, pinned by a gate probe.
-  val borrowerAuth = INPUTS.exists { (b: Box) => b.propositionBytes == borrower }
+  val borrowerAuth = INPUTS.exists { (b: Box) => blake2b256(b.propositionBytes) == borrower }
 
   sigmaProp(
     liquidateOk || crankOk || couponOk || accelerateOk || missedAccelOk ||

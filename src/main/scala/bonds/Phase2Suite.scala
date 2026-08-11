@@ -163,15 +163,19 @@ object B_SuccessorWall {
       // one register at a time
       rejectCrank("B1 successor R4 (order id) mutated",
         honest.copy(r4 = ErgoValue.of(Array.fill[Byte](32)(0))))
-      rejectCrank("B2 successor R5 (borrower key) swapped to the keeper",
-        honest.copy(r5 = ErgoValue.of(kAddr.toErgoContract.getErgoTree.bytes)))
+      // Rev 4: R5 is the borrower script HASH, so the mask writes the
+      // keeper's script hash — a well-formed value for the WRONG party.
+      rejectCrank("B2 successor R5 (borrower hash) swapped to the keeper",
+        honest.copy(r5 = ErgoValue.of(P4.h32(kAddr.toErgoContract.getErgoTree.bytes))))
       rejectCrank("B3 successor R6 (repayment) reduced by 1",
         honest.copy(r6 = ErgoValue.of(
           bondBox.getRegisters.get(2).getValue.asInstanceOf[Long] - 1L)))
       rejectCrank("B4 successor R7 (maturity) extended by 100",
         honest.copy(r7 = ErgoValue.of(maturity + 100)))
-      rejectCrank("B5 successor R8 (lender script) off by one byte",
-        honest.copy(r8 = P4.packValue(Seq(TestLib.vaultVariantTree().bytes))))
+      // Rev 4: R8(0) is the lender script HASH — "one byte off" becomes
+      // the hash OF the one-byte-off vault variant (same attack, hashed).
+      rejectCrank("B5 successor R8(0) = hash of the one-byte-off lender script",
+        honest.copy(r8 = P4.packValue(Seq(P4.h32(TestLib.vaultVariantTree().bytes)))))
 
       // every schedule element beyond the permitted advance
       rejectCrank("B6a schedule installment mutated",       honest.copy(r9 = mutSched(0, 1L)))

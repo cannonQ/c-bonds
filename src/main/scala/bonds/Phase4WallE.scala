@@ -79,18 +79,19 @@ object Phase4WallE {
     bl.outputs(succ, kb).fee(Kit.TX_FEE).sendChangeTo(payTo).build()
   }
 
-  /** Repay of a rev-3 bond: exit to the R8(0) lender script with the R4
+  /** Repay of a rev-3/4 bond: exit to the lender script with the R4
     * receipt and the loan token only. `extra` lets E5 co-spend arbitrary
     * boxes (the fab contract-borrower box); funding is selected from
     * `funderAddr` — the funder IS the co-spend under the rev-3 borrowerAuth,
-    * which is exactly the mechanism E5 pins. */
+    * which is exactly the mechanism E5 pins. Rev 4: bond R8(0) is only the
+    * lender HASH, so the destination arrives as `lenderTree`. */
   def repayV3(ctx: BlockchainContext, bond: InputBox, extra: Seq[InputBox],
-              funderAddr: Address): UnsignedTransaction = {
+              funderAddr: Address, lenderTree: Array[Byte]): UnsignedTransaction = {
     val funds = Kit.selectBoxes(ctx, funderAddr, Kit.TX_FEE + Kit.MIN_BOX_VALUE)
     val tb    = ctx.newTxBuilder()
     val exit = tb.outBoxBuilder()
       .value(P3.repaymentOf(bond))
-      .contract(P4.contractFromBytes(P4.lenderTreeBytesOf(bond)))
+      .contract(P4.contractFromBytes(lenderTree))
       .tokens(new ErgoToken(bond.getTokens.get(0).getId, 1L))
       .registers(ErgoValue.of(bond.getId.getBytes))
       .build()
@@ -151,25 +152,9 @@ object Phase4WallE {
 
   def run(cardA: Option[(String, String)] = None,
           cardB: Option[(String, String)] = None,
-          cardC: Option[(String, String)] = None): Unit = Kit.exec { ctx0 =>
-    println("=== Phase 4 E-wall: rev-3 structural adversarial wall (E1-E9) ===")
-
-    // Cards: mint fresh unless resume ids were passed (REV3-KICKOFF §2).
-    val (cAId, cANft) = cardA.getOrElse(P4.mintCard("c-bonds T2",
-      "rev-3 card A: full covenant tier, every field explicit at compiled values",
-      P4.CARD_A_R7, P4.explicitCardR8, "card-mint-A"))
-    val (cBId, cBNft) = cardB.getOrElse(P4.mintCard("c-bonds sentinel",
-      "rev-3 card B: every optional zeroed -> compiled defaults",
-      P4.CARD_B_R7, P4.sentinelCardR8, "card-mint-B"))
-    val (cCId, cCNft) = cardC.getOrElse(P4.mintCard("c-bonds bounds",
-      "rev-3 card C: tightened threshold range + raised order floor",
-      P4.CARD_C_R7, P4.sentinelCardR8, "card-mint-C"))
-    println(s"card A $cAId  NFT $cANft")
-    println(s"card B $cBId  NFT $cBNft")
-    println(s"card C $cCId  NFT $cCNft")
-    val pinA = ErgoId.create(cANft).getBytes
-    val pinB = ErgoId.create(cBNft).getBytes
-    val pinC = ErgoId.create(cCNft).getBytes
+          cardC: Option[(String, String)] = None,
+          cardH: Option[(String, String)] = None): Unit = Kit.exec { ctx0 =>
+    println("=== Phase 4 E-wall: structural adversarial wall (E1-E9 rev 3, E11-E15 rev 4) ===")
 
     // Context-free shared values (trees are deterministic; borrower bytes
     // are the rev-3 script-borrower identity: EIP-3 index-0 P2PK tree).
@@ -180,6 +165,40 @@ object Phase4WallE {
       .toErgoContract.getErgoTree.bytes
     val poolNftBytes  = ErgoId.create(POOL_NFT).getBytes
     val collatBytes   = ErgoId.create(COLLATERAL_TOKEN_ID).getBytes
+    // Rev 4 (D1/D2): bond R5 / R8(0) hold blake2b256 of the trees. The
+    // full bytes above remain every payment destination and the ctx-ext
+    // preimage the match reveals; these are what the REGISTERS carry.
+    val vaultHash     = P4.h32(vaultBytes)
+    val borrowerHash  = P4.h32(borrowerBytes)
+    // Rev 4 (A-H1/B-H2): the blessed hook of card H is the lender vault;
+    // the one-byte variant is the UNBLESSED hook every negative uses.
+    val hookBlessed   = vaultHash
+    val hookUnblessed = P4.h32(vaultVarBytes)
+
+    // Cards: mint fresh unless resume ids were passed (REV3-KICKOFF §2;
+    // card H is the rev-4 addition — same tier as A, plus a blessed-hook
+    // suffix at card R8 index 4).
+    val (cAId, cANft) = cardA.getOrElse(P4.mintCard("c-bonds T2",
+      "rev-3 card A: full covenant tier, every field explicit at compiled values",
+      P4.CARD_A_R7, P4.explicitCardR8, "card-mint-A"))
+    val (cBId, cBNft) = cardB.getOrElse(P4.mintCard("c-bonds sentinel",
+      "rev-3 card B: every optional zeroed -> compiled defaults",
+      P4.CARD_B_R7, P4.sentinelCardR8, "card-mint-B"))
+    val (cCId, cCNft) = cardC.getOrElse(P4.mintCard("c-bonds bounds",
+      "rev-3 card C: tightened threshold range + raised order floor",
+      P4.CARD_C_R7, P4.sentinelCardR8, "card-mint-C"))
+    val (cHId, cHNft) = cardH.getOrElse(P4.mintCard("c-bonds hooked",
+      "rev-4 card H: card A's tier, blessing the lender-vault liquidation hook",
+      P4.CARD_A_R7, P4.cardR8WithHooks(poolNftBytes, collatBytes, Seq(hookBlessed)),
+      "card-mint-H"))
+    println(s"card A $cAId  NFT $cANft")
+    println(s"card B $cBId  NFT $cBNft")
+    println(s"card C $cCId  NFT $cCNft")
+    println(s"card H $cHId  NFT $cHNft  (blessed hook ${TestLib.hex(hookBlessed).take(16)}…)")
+    val pinA = ErgoId.create(cANft).getBytes
+    val pinB = ErgoId.create(cBNft).getBytes
+    val pinC = ErgoId.create(cCNft).getBytes
+    val pinH = ErgoId.create(cHNft).getBytes
 
     // Each group runs in its own Kit.exec so script evaluation always sees
     // a fresh context after the on-chain post/cancel confirmation waits
@@ -311,11 +330,11 @@ object Phase4WallE {
               s3(8) == LIQ_CARVEOUT && s3(9) == HAIRCUT_KEEP,
         "E3: sentinel card did not resolve to compiled defaults in R9(6..9)")
       val r83 = P4.packOf(bond3, 4)
-      require(r83.size == 1 && java.util.Arrays.equals(r83.head, vaultBytes),
-        "E3: covenant-off bond R8 pack != [lenderScript]")
+      require(r83.size == 1 && java.util.Arrays.equals(r83.head, vaultHash),
+        "E3: covenant-off bond R8 pack != [blake2b256(lenderScript)] (rev 4)")
       require(P4.resolve(P4.CARD_B_R7) == P4.COMPILED_DEFAULTS,
         "E3: harness mirror drift — resolve(CARD_B_R7) != COMPILED_DEFAULTS")
-      println("  PASS E3 register assert — R9 = [sched6 | 5000000, 10, 3000000, 9800], R8 = [lenderScript]")
+      println("  PASS E3 register assert — R9 = [sched6 | 5000000, 10, 3000000, 9800], R8 = [lenderHash]")
       P4.cancelOrderV3(o3, "E3 cleanup cancel")
       ()
     }
@@ -395,27 +414,28 @@ object Phase4WallE {
         .value(Kit.MIN_BOX_VALUE).contract(trivialContract)
         .build().convertToInputWith(P4.DUMMY_TX, 1)
 
-      // Covenant-off bullet, rev-3 shape (R5 script bytes, R8 size 1).
+      // Covenant-off bullet, rev-4 shape (R5 borrower HASH, R8 size 1
+      // holding the lender HASH).
       val schedBullet = Array[Long](0L, 500L, 0L, (h + 500).toLong, 0L, 0L)
-      val p2pkBond = P4.fabBondV3(ctx, schedBullet, Seq(vaultBytes), borrowerBytes,
+      val p2pkBond = P4.fabBondV3(ctx, schedBullet, Seq(vaultHash), borrowerHash,
         TestLib.COLLATERAL, TestLib.REPAYMENT, h + 500)
-      val contractBond = P4.fabBondV3(ctx, schedBullet, Seq(vaultBytes), trivialBytes,
+      val contractBond = P4.fabBondV3(ctx, schedBullet, Seq(vaultHash), P4.h32(trivialBytes),
         TestLib.COLLATERAL, TestLib.REPAYMENT, h + 500)
       // In-cure covenant bond that already prices healthy (zero-delta cure).
       val schedCure = Array[Long](0L, PERIOD, 0L, -(h + 5).toLong, thrH, CRANK_BOUNTY)
-      val cureBond = P4.fabBondV3(ctx, schedCure, Seq(vaultBytes, poolNftBytes),
-        borrowerBytes, MIN_ORDER_VALUE + CRANK_BOUNTY, REPAY, h + 500,
+      val cureBond = P4.fabBondV3(ctx, schedCure, Seq(vaultHash, poolNftBytes),
+        borrowerHash, MIN_ORDER_VALUE + CRANK_BOUNTY, REPAY, h + 500,
         tokens = Seq(new ErgoToken(P3.RSN_ID, RSN_AMT)))
 
       // -- negatives: no borrower-script input anywhere in the tx --
       Kit.expectRejected("E5a repay without borrower-script co-spend (keeper-funded)") {
-        kP.sign(repayV3(ctx, p2pkBond, Nil, kAddr))
+        kP.sign(repayV3(ctx, p2pkBond, Nil, kAddr, vaultBytes))
       }
       // Wrong-script co-spend: an explicit non-borrower CONTRACT box rides
       // as an input (satisfiable by anyone), keeper funds again — still no
       // box at the borrower's script, so borrowerAuth must stay false.
       Kit.expectRejected("E5b repay with wrong-script co-spend (trivial-contract box, no borrower box)") {
-        kP.sign(repayV3(ctx, p2pkBond, Seq(fabTrivial), kAddr))
+        kP.sign(repayV3(ctx, p2pkBond, Seq(fabTrivial), kAddr, vaultBytes))
       }
       Kit.expectRejected("E5c top-up without borrower-script co-spend (keeper-funded)") {
         kP.sign(topUpV3(ctx, p2pkBond, kAddr, Kit.MIN_BOX_VALUE))
@@ -427,7 +447,7 @@ object Phase4WallE {
       // -- P2PK-borrower twins: same txs funded from the borrower wallet
       // (the borrower's own fee boxes ARE the authorization now) --
       Kit.expectReduces("E5-twin repay borrower-funded reduces") {
-        b.reduce(repayV3(ctx, p2pkBond, Nil, bAddr), 0).getCost
+        b.reduce(repayV3(ctx, p2pkBond, Nil, bAddr, vaultBytes), 0).getCost
       }
       Kit.expectReduces("E5-twin top-up borrower-funded reduces") {
         b.reduce(topUpV3(ctx, p2pkBond, bAddr, Kit.MIN_BOX_VALUE), 0).getCost
@@ -441,7 +461,7 @@ object Phase4WallE {
       // input 0 (the bond), so the fabricated co-spend is fine for a LOCAL
       // reduce; the no-secret prover shows no signature is involved. --
       Kit.expectReduces("E5-twin contract-borrower repay reduces (script co-spend, no key)") {
-        k.reduce(repayV3(ctx, contractBond, Seq(fabTrivial), kAddr), 0).getCost
+        k.reduce(repayV3(ctx, contractBond, Seq(fabTrivial), kAddr, vaultBytes), 0).getCost
       }
 
       // -- order cancel under the same mechanism: a REAL tiny order; the
@@ -458,6 +478,41 @@ object Phase4WallE {
           .fee(Kit.TX_FEE).sendChangeTo(kAddr).build())
       }
       P4.cancelOrderV3(o5, "E5-twin real cancel (borrower co-spend)")
+
+      // -- E5f (rev-4 audit A-L1, W-B1 order half): an order whose R4 is
+      // the ORDER TREE ITSELF must not self-authorize its own cancel. The
+      // co-spend rule is "some OTHER input is guarded by the borrower
+      // bytes"; without the SELF exclusion this order would be spendable
+      // by anyone who can pay the fee. Fabricated locally (nobody would
+      // ever post one on purpose) and cancelled by the keeper. --
+      val (orderTreeE5, orderContractE5) = Contracts.order(ctx)
+      def fabOrderWithR4(r4: Array[Byte]): InputBox =
+        ctx.newTxBuilder().outBoxBuilder()
+          .value(TestLib.COLLATERAL)
+          .contract(orderContractE5)
+          .registers(
+            ErgoValue.of(r4),
+            ErgoValue.of(TestLib.PRINCIPAL),
+            ErgoValue.of(TestLib.REPAYMENT),
+            ErgoValue.of(720),
+            P4.packValue(Seq(Array.emptyByteArray)),
+            ErgoValue.of(Array[Long](0L, 720L, 0L, 0L, 0L, 0L)))
+          .build()
+          .convertToInputWith(P4.DUMMY_TX, 5)
+      def cancelOfFab(ord: InputBox, who: Address): UnsignedTransaction = {
+        val funds = Kit.selectBoxes(ctx, who, Kit.TX_FEE)
+        val tb    = ctx.newTxBuilder()
+        val out = tb.outBoxBuilder().value(ord.getValue - Kit.TX_FEE)
+          .contract(who.toErgoContract).build()
+        tb.boxesToSpend((Seq(ord) ++ funds).asJava).outputs(out)
+          .fee(Kit.TX_FEE).sendChangeTo(who).build()
+      }
+      Kit.expectRejected("E5f order with R4 == the order tree cancelled by a stranger (SELF excluded from borrowerAuth)") {
+        kP.sign(cancelOfFab(fabOrderWithR4(orderTreeE5.bytes), kAddr))
+      }
+      Kit.expectReduces("E5f-twin same fab shape with R4 = the real borrower script, borrower co-spend, reduces") {
+        b.reduce(cancelOfFab(fabOrderWithR4(borrowerBytes), bAddr), 0).getCost
+      }
       ()
     }
 
@@ -484,14 +539,55 @@ object Phase4WallE {
       Kit.expectScriptFalse("E6a empty R8 pack (size 0) unmatchable") {
         l.sign(m6(Some(Seq.empty)))
       }
-      Kit.expectScriptFalse("E6b swapped pack [poolNFT, lenderScript] unmatchable") {
-        l.sign(m6(Some(Seq(poolNftBytes, vaultBytes))))
+      Kit.expectScriptFalse("E6b swapped pack [poolNFT, lenderHash] unmatchable") {
+        l.sign(m6(Some(Seq(poolNftBytes, vaultHash))))
       }
       Kit.expectScriptFalse("E6c oversized pack (4 elements, garbage suffix) unmatchable") {
-        l.sign(m6(Some(Seq(vaultBytes, poolNftBytes, JUNK32, JUNK32))))
+        l.sign(m6(Some(Seq(vaultHash, poolNftBytes, JUNK32, JUNK32))))
       }
       Kit.expectScriptFalse("E6d size-1 pack on a COVENANT order (pool NFT missing) unmatchable") {
-        l.sign(m6(Some(Seq(vaultBytes))))
+        l.sign(m6(Some(Seq(vaultHash))))
+      }
+      // Rev 4 (D1/D3): R8(0) must BE a 32-byte hash whose preimage the
+      // match reveals. Writing the full lender tree at element 0 — the
+      // rev-3 shape — is now itself the negative (size != 32).
+      Kit.expectScriptFalse("E6b' rev-3 shape: full lender tree at R8(0) unmatchable (must be a 32-byte hash)") {
+        l.sign(m6(Some(Seq(vaultBytes, poolNftBytes))))
+      }
+      // ...and a well-sized 32-byte value nobody can open fails the reveal.
+      Kit.expectScriptFalse("E6b'' unopenable 32-byte R8(0) (no preimage revealed) unmatchable") {
+        l.sign(m6(Some(Seq(JUNK32, poolNftBytes))))
+      }
+      // Rev 4 (W-L2): br8(0) must be EXACTLY 32 bytes — the near-miss
+      // sizes are their own negatives, because a short/long "hash" cannot
+      // be a blake2b256 output and no reveal can ever open it.
+      Kit.expectScriptFalse("E6i R8(0) 31 bytes (one short of a hash) unmatchable") {
+        l.sign(m6(Some(Seq(JUNK32.take(31), poolNftBytes))))
+      }
+      Kit.expectScriptFalse("E6j R8(0) 33 bytes (one over a hash) unmatchable") {
+        l.sign(m6(Some(Seq(JUNK32 :+ 0x77.toByte, poolNftBytes))))
+      }
+      // Rev 4 (W-L1): the reveal itself. Absent var 0 and a var 0 that is
+      // not the preimage are separate failures of the same conjunct.
+      Kit.expectScriptFalse("E6k match with NO ctx-ext var 0 (reveal absent) unmatchable") {
+        l.sign(P4.buildMatchV3(ctx, o6Box, vaultBytes, 24, None,
+          dropLenderVar = true, preHeaderHeight = Some(Kit.nodeHeight())))
+      }
+      Kit.expectScriptFalse("E6l match revealing a one-byte-off script (hash mismatch) unmatchable") {
+        l.sign(P4.buildMatchV3(ctx, o6Box, vaultBytes, 24, None,
+          lenderRevealOverride = Some(vaultVarBytes),
+          preHeaderHeight = Some(Kit.nodeHeight())))
+      }
+      // W-L5, the DOCUMENTED-NOT-PREVENTED posture, confirmed once: bytes
+      // that are not a deserializable script still hash correctly, so the
+      // match SUCCEEDS. The reveal proves the preimage EXISTS on-chain, not
+      // that it is spendable — a funder who self-burns their own repayment
+      // stream is the same class as rev 2/3 (REV4-DECISIONS D1, A-M2).
+      // LOCAL REDUCE ONLY: this shape is never submitted.
+      val garbageLender: Array[Byte] = Array.fill[Byte](40)(0x5a.toByte)
+      Kit.expectReduces("E6-twin W-L5 garbage lender bytes that hash correctly: match REDUCES (self-burn posture)") {
+        l.reduce(P4.buildMatchV3(ctx, o6Box, garbageLender, 24, None,
+          preHeaderHeight = Some(Kit.nodeHeight())), 0).getCost
       }
       Kit.expectReduces("E6-twin honest covenant match (size-2 pack) reduces") {
         l.reduce(m6(None), 0).getCost
@@ -501,16 +597,16 @@ object Phase4WallE {
       // -- BOND side: the three legitimate sizes reduce on their paths --
       // size 1: covenant-off repay (borrower-funded co-spend).
       val schedBullet = Array[Long](0L, 500L, 0L, (h + 500).toLong, 0L, 0L)
-      val size1Bond = P4.fabBondV3(ctx, schedBullet, Seq(vaultBytes), borrowerBytes,
+      val size1Bond = P4.fabBondV3(ctx, schedBullet, Seq(vaultHash), borrowerHash,
         TestLib.COLLATERAL, TestLib.REPAYMENT, h + 500)
       Kit.expectReduces("E6e size-1 pack: covenant-off repay reduces") {
-        b.reduce(repayV3(ctx, size1Bond, Nil, bAddr), 0).getCost
+        b.reduce(repayV3(ctx, size1Bond, Nil, bAddr, vaultBytes), 0).getCost
       }
       // size 2: covenant crank against the live pool (rev-3 reads the pool
       // NFT from its own R8(1)); 6-element covenant fab, compiled defaults.
       val schedCov = Array[Long](0L, PERIOD, 0L, (h - 5).toLong, thrH, CRANK_BOUNTY)
-      val size2Bond = P4.fabBondV3(ctx, schedCov, Seq(vaultBytes, poolNftBytes),
-        borrowerBytes, MIN_ORDER_VALUE + CRANK_BOUNTY, REPAY, h + 500,
+      val size2Bond = P4.fabBondV3(ctx, schedCov, Seq(vaultHash, poolNftBytes),
+        borrowerHash, MIN_ORDER_VALUE + CRANK_BOUNTY, REPAY, h + 500,
         tokens = Seq(new ErgoToken(P3.RSN_ID, RSN_AMT)))
       Kit.expectReduces("E6f size-2 pack: covenant crank (healthy advance) reduces") {
         k.reduce(crankV3(ctx, size2Bond, Some(pool), advV3(schedCov), h, kAddr), 0).getCost
@@ -526,7 +622,7 @@ object Phase4WallE {
       // discipline is deliberately relaxed for this single fabrication
       // case: ANY failure (interpreter crash included) is the pass — there
       // is no honest spend of this shape, so no "right reason" exists.
-      val brickedBond = P4.fabBondV3(ctx, schedBullet, Seq.empty, borrowerBytes,
+      val brickedBond = P4.fabBondV3(ctx, schedBullet, Seq.empty, borrowerHash,
         TestLib.COLLATERAL, TestLib.REPAYMENT, h + 500)
       scala.util.Try {
         // Built without reading R8 harness-side (packOf(...).head would
@@ -590,12 +686,12 @@ object Phase4WallE {
       val (attTree, _) = Kit.compile(ctx, "{ sigmaProp(HEIGHT > 0) }", ConstantsBuilder.empty())
       val attHash: Array[Byte] = scorex.crypto.hash.Blake2b256(attTree.bytes)
       // R9 = 11 elements (6 sched + suffix + aType 1 at index 10, L6);
-      // R8 = 4 elements [lenderScript, poolNFT, empty hook, attesterHash].
+      // R8 = 4 elements [lenderHash, poolNFT, empty hook, attesterHash].
       val schedAtt = Array[Long](0L, PERIOD, 0L, (h - 5).toLong, 15000L, CRANK_BOUNTY,
         CRANK_BOUNTY, GRACE_BLOCKS, LIQ_CARVEOUT, HAIRCUT_KEEP, 1L)
       val attBond = P4.fabBondV3(ctx, schedAtt,
-        Seq(vaultBytes, poolNftBytes, Array.emptyByteArray, attHash),
-        borrowerBytes, MIN_ORDER_VALUE + CRANK_BOUNTY, REPAY, h + 500)
+        Seq(vaultHash, poolNftBytes, Array.emptyByteArray, attHash),
+        borrowerHash, MIN_ORDER_VALUE + CRANK_BOUNTY, REPAY, h + 500)
       val loanId  = ErgoId.create(P4.FAKE_LOAN).getBytes
       val passBox = P4.fabAttesterBox(ctx, attTree, loanId, schedAtt(3), pass = true)
       val failBox = P4.fabAttesterBox(ctx, attTree, loanId, schedAtt(3), pass = false)
@@ -637,14 +733,14 @@ object Phase4WallE {
 
       // Per the §5.1 table size 3 presupposes covenant, so the fab is
       // covenant-SHAPED (threshold in R9(4), RSN token) even though the
-      // hook fires on the height-gated liquidation arm. R8(0) is the
-      // lender's P2PK tree — distinct from the hook script — so the rebind
-      // is observable. Pre-header >= maturity opens the liquidation arm.
+      // hook fires on the height-gated liquidation arm. R8(0) is the HASH
+      // of the lender's P2PK tree — distinct from the hook script — so the
+      // rebind is observable. Pre-header >= maturity opens the liquidation arm.
       val schedH8 = Array[Long](0L, PERIOD, 0L, (h + 20).toLong, 15000L, CRANK_BOUNTY)
       val lenderP2pkBytes = lTree.bytes
       val hookedBond = P4.fabBondV3(ctx, schedH8,
-        Seq(lenderP2pkBytes, poolNftBytes, hookHash),
-        borrowerBytes, MIN_ORDER_VALUE + CRANK_BOUNTY, REPAY, matE8,
+        Seq(P4.h32(lenderP2pkBytes), poolNftBytes, hookHash),
+        borrowerHash, MIN_ORDER_VALUE + CRANK_BOUNTY, REPAY, matE8,
         tokens = Seq(new ErgoToken(P3.RSN_ID, RSN_AMT)))
 
       Kit.expectReduces("E8-twin right hook preimage: exit at the hook script reduces") {
@@ -663,8 +759,8 @@ object Phase4WallE {
           preHeaderHeight = Some(matE8 + 1)))
       }
       // Hook absent (size-2 pack): standard liquidation to R8(0) unchanged.
-      val plainBond = P4.fabBondV3(ctx, schedH8, Seq(lenderP2pkBytes, poolNftBytes),
-        borrowerBytes, MIN_ORDER_VALUE + CRANK_BOUNTY, REPAY, matE8,
+      val plainBond = P4.fabBondV3(ctx, schedH8, Seq(P4.h32(lenderP2pkBytes), poolNftBytes),
+        borrowerHash, MIN_ORDER_VALUE + CRANK_BOUNTY, REPAY, matE8,
         tokens = Seq(new ErgoToken(P3.RSN_ID, RSN_AMT)))
       Kit.expectReduces("E8c-twin size-2 pack: plain liquidation to the R8(0) lender script reduces") {
         kP.reduce(TestLib.buildExit(ctx, plainBond,
@@ -699,9 +795,9 @@ object Phase4WallE {
               s9(3) == preH9 + t9(1) && s9(4) == t9(4) && s9(5) == t9(5),
         "E9: card-less bond schedule does not copy the order template")
       val r89 = P4.packOf(bond9, 4)
-      require(r89.size == 1 && java.util.Arrays.equals(r89.head, vaultBytes),
-        "E9: card-less bond R8 pack != [lenderScript]")
-      println("  PASS E9 register assert — R9 size 6, R8 = [lenderScript] (rev-2 byte shape)")
+      require(r89.size == 1 && java.util.Arrays.equals(r89.head, vaultHash),
+        "E9: card-less bond R8 pack != [blake2b256(lenderScript)] (rev 4)")
+      println("  PASS E9 register assert — R9 size 6, R8 = [lenderHash] (rev-4 pack shape)")
 
       // Card-pinned order WITHOUT its data input supplied: unmatchable —
       // and per L9 the guarded cardOk lambda must make this a CLEAN
@@ -718,22 +814,353 @@ object Phase4WallE {
     }
 
     // =====================================================================
+    println("=== E11: card-blessed hooks + the var-1 reveal (A-H1/B-H2, W-H1) ===")
+    // Rev 4 closes the D3/A-H1 class in two conjuncts: a pinned hook must
+    // be REVEALED at match (ctx-ext var 1 on the order input) and BLESSED
+    // by the pinned card (its hash listed at card R8 index >= 4). Hook and
+    // terms travel as one immutable bundle; a borrower can no longer pin a
+    // hook nobody can open — or one nobody has vetted.
+    Kit.exec { ctx =>
+      val l         = TestLib.lender(ctx)
+      val cHBox     = ctx.getBoxesById(cHId)(0)
+      val cABox     = ctx.getBoxesById(cAId)(0)
+      val lenderP2pk = l.getEip3Addresses.get(0).toErgoContract.getErgoTree.bytes
+
+      def postHooked(pin: Array[Byte], hook: Array[Byte], label: String): String =
+        P4.postOrderV3(collateral = MIN_ORDER_VALUE, repayment = REPAY, term = 24,
+          collTokens = Seq(new ErgoToken(P3.RSN_ID, RSN_AMT)), period = 8L,
+          thresholdBps = 15000L, cardPin = pin, hookHash = Some(hook), label = label)
+
+      // (a) BLESSED hook on card H — isolate the var-1 reveal. The lender
+      // script is the P2PK tree here, so the two reveals are distinct
+      // values and a builder that confused the indices would be visible.
+      val o11    = postHooked(pinH, hookBlessed, "E11 post hook-pinned order (blessed hook)")
+      val o11Box = ctx.getBoxesById(o11)(0)
+      def m11(hookBytes: Option[Array[Byte]], dropHook: Boolean,
+              card: InputBox = cHBox): UnsignedTransaction =
+        P4.buildMatchV3(ctx, o11Box, lenderP2pk, 24, Some(card),
+          hookScriptBytes = hookBytes, dropHookVar = dropHook,
+          preHeaderHeight = Some(Kit.nodeHeight()))
+      Kit.expectScriptFalse("E11a hook pinned, ctx-ext var 1 ABSENT (W-H1) unmatchable") {
+        l.sign(m11(None, dropHook = true))
+      }
+      Kit.expectScriptFalse("E11b hook pinned, var 1 reveals a one-byte-off script (hash mismatch) unmatchable") {
+        l.sign(m11(Some(vaultVarBytes), dropHook = false))
+      }
+      Kit.expectReduces("E11-twin blessed hook with the correct var-1 reveal reduces") {
+        l.reduce(m11(Some(vaultBytes), dropHook = false), 0).getCost
+      }
+      P4.cancelOrderV3(o11, "E11 cleanup cancel (blessed-hook order)")
+
+      // (b) UNBLESSED hook: the preimage is revealed correctly and still
+      // fails — the card, not the reveal, is what authorizes a hook.
+      val o11c    = postHooked(pinH, hookUnblessed, "E11c post unblessed-hook order")
+      val o11cBox = ctx.getBoxesById(o11c)(0)
+      Kit.expectScriptFalse("E11c hook NOT listed on the pinned card (correct reveal, unblessed) unmatchable") {
+        l.sign(P4.buildMatchV3(ctx, o11cBox, lenderP2pk, 24, Some(cHBox),
+          hookScriptBytes = Some(vaultVarBytes), preHeaderHeight = Some(Kit.nodeHeight())))
+      }
+      P4.cancelOrderV3(o11c, "E11c cleanup cancel")
+
+      // (c) A card with NO blessed-hook suffix (card A, the live catalog
+      // shape) blesses nothing: every hooked order pinned to it is dead.
+      val o11d    = postHooked(pinA, hookBlessed, "E11d post hooked order pinned to a hookless card")
+      val o11dBox = ctx.getBoxesById(o11d)(0)
+      Kit.expectScriptFalse("E11d hooked order pinned to a card with no hook slots unmatchable") {
+        l.sign(P4.buildMatchV3(ctx, o11dBox, lenderP2pk, 24, Some(cABox),
+          hookScriptBytes = Some(vaultBytes), preHeaderHeight = Some(Kit.nodeHeight())))
+      }
+      P4.cancelOrderV3(o11d, "E11d cleanup cancel")
+      ()
+    }
+
+    // =====================================================================
+    println("=== E12: card-less hooked order (hooks are a CARDED capability) ===")
+    // The card-less arm forbids hooks outright (!hookPresent): with no
+    // card there is no publisher to vet the hook script, so plain SigmaFi
+    // liquidation to the lender is the only legal exit.
+    Kit.exec { ctx =>
+      val l          = TestLib.lender(ctx)
+      val lenderP2pk = l.getEip3Addresses.get(0).toErgoContract.getErgoTree.bytes
+      val o12 = P4.postOrderV3(collateral = MIN_ORDER_VALUE, repayment = REPAY, term = 24,
+        collTokens = Seq(new ErgoToken(P3.RSN_ID, RSN_AMT)), period = 8L,
+        thresholdBps = 15000L, hookHash = Some(hookBlessed),
+        label = "E12 post card-less hooked order")
+      val o12Box = ctx.getBoxesById(o12)(0)
+      Kit.expectScriptFalse("E12 card-less order carrying a hook hash unmatchable (even with a correct reveal)") {
+        l.sign(P4.buildMatchV3(ctx, o12Box, lenderP2pk, 24, None,
+          hookScriptBytes = Some(vaultBytes), preHeaderHeight = Some(Kit.nodeHeight())))
+      }
+      println("  (pass-twin: the same card-less covenant order WITHOUT a hook is E6-twin)")
+      P4.cancelOrderV3(o12, "E12 cleanup cancel")
+      ()
+    }
+
+    // =====================================================================
+    println("=== E13: fabricated price source (SPECTRUM_POOL_HASH pin, B-M1b) ===")
+    // Before rev 4 the verdict authenticated its data input by NFT id
+    // alone: mint your own 'pool NFT', put it on a 3-token box with any
+    // reserves you like, and the covenant prices whatever you want. The
+    // fake pool below is built to price the bond HEALTHY by a mile — so
+    // the ONLY thing that can reject the crank is the script-hash pin.
+    Kit.exec { ctx =>
+      val k     = Kit.noSecretProver(ctx)
+      val kAddr = TestLib.keeper(ctx).getEip3Addresses.get(0)
+      val h     = ctx.getHeight
+      val pool  = P3.poolBox(ctx)
+      val (_, fakeContract) =
+        Kit.compile(ctx, "{ sigmaProp(HEIGHT > 0) }", ConstantsBuilder.empty())
+      val fakeNft   = ErgoId.create("aa" * 32)
+      val fakeLp    = ErgoId.create("ab" * 32)
+      val fakePool  = P4.fabPoolBox(ctx, fakeContract, fakeNft, fakeLp, P3.RSN_ID,
+        rX = 1000000000000L, rY = 1000L, feeNum = 990)
+      val sched13   = Array[Long](0L, PERIOD, 0L, (h - 5).toLong, 15000L, CRANK_BOUNTY)
+      val fakeBond  = P4.fabBondV3(ctx, sched13, Seq(vaultHash, fakeNft.getBytes),
+        borrowerHash, MIN_ORDER_VALUE + CRANK_BOUNTY, REPAY, h + 500,
+        tokens = Seq(new ErgoToken(P3.RSN_ID, RSN_AMT)))
+      require(P4.healthyV3(fakePool, fakeBond.getValue - sched13(5), RSN_AMT, REPAY, 15000L, HAIRCUT_KEEP),
+        "E13 setup: the fake pool must price HEALTHY, so only the script pin can reject")
+      require(fakePool.getTokens.size == 3, "E13 setup: the fake pool must be pool-SHAPED (3 tokens)")
+
+      Kit.expectRejected("E13a crank ADVANCE against a fabricated pool (verdict -1: script hash pin)") {
+        TestLib.keeper(ctx).sign(crankV3(ctx, fakeBond, Some(fakePool), advV3(sched13), h, kAddr))
+      }
+      Kit.expectRejected("E13b crank CURE against the same fabricated pool (fail-closed, -1 satisfies neither branch)") {
+        TestLib.keeper(ctx).sign(crankV3(ctx, fakeBond, Some(fakePool), cureV3(sched13), h, kAddr))
+      }
+      // Positive twin: identical bond shape pinned to the REAL pool NFT,
+      // priced by the REAL pool box — the gate's live-pool probe in one line.
+      val realBond = P4.fabBondV3(ctx, sched13, Seq(vaultHash, poolNftBytes),
+        borrowerHash, MIN_ORDER_VALUE + CRANK_BOUNTY, REPAY, h + 500,
+        tokens = Seq(new ErgoToken(P3.RSN_ID, RSN_AMT)))
+      require(P4.healthyV3(pool, realBond.getValue - sched13(5), RSN_AMT, REPAY, 15000L, HAIRCUT_KEEP),
+        "E13 setup: threshold 15000 must price healthy against LIVE reserves")
+      Kit.expectReduces("E13-twin same crank against the REAL Spectrum pool reduces") {
+        k.reduce(crankV3(ctx, realBond, Some(pool), advV3(sched13), h, kAddr), 0).getCost
+      }
+      ()
+    }
+
+    // =====================================================================
+    println("=== E14: repay must return the collateral to the borrower (B-M3) ===")
+    // A loose contract borrower (a DAO script that signs plenty of txs)
+    // could otherwise have its collateral routed to a stranger as a side
+    // effect of a tx that 'repays' its bond. Rev 4 pins every collateral
+    // token to an output whose script hashes to R5.
+    Kit.exec { ctx =>
+      val b     = TestLib.borrower(ctx)
+      val bAddr = b.getEip3Addresses.get(0)
+      val kAddr = TestLib.keeper(ctx).getEip3Addresses.get(0)
+      val h     = ctx.getHeight
+      val sched14 = Array[Long](0L, 500L, 0L, (h + 500).toLong, 0L, 0L)
+      val bond14  = P4.fabBondV3(ctx, sched14, Seq(vaultHash), borrowerHash,
+        TestLib.COLLATERAL, REPAY, h + 500, tokens = Seq(new ErgoToken(P3.RSN_ID, RSN_AMT)))
+
+      /** Repay whose collateral leg is routed to `collatTo`: everything
+        * else is the honest shape (exit to the lender script, repayment
+        * value, R4 receipt, loan token, borrower co-spend by funding). */
+      def repay14(collatTo: Address): UnsignedTransaction = {
+        val funds = Kit.selectBoxes(ctx, bAddr, REPAY + Kit.TX_FEE + 2 * Kit.MIN_BOX_VALUE)
+        val tb    = ctx.newTxBuilder()
+        val exit = tb.outBoxBuilder()
+          .value(REPAY)
+          .contract(new ErgoTreeContract(vault, NetworkType.MAINNET))
+          .tokens(new ErgoToken(bond14.getTokens.get(0).getId, 1L))
+          .registers(ErgoValue.of(bond14.getId.getBytes))
+          .build()
+        val collatBox = tb.outBoxBuilder()
+          .value(Kit.MIN_BOX_VALUE)
+          .contract(collatTo.toErgoContract)
+          .tokens(new ErgoToken(P3.RSN_ID, RSN_AMT))
+          .build()
+        tb.boxesToSpend((Seq(bond14) ++ funds).asJava)
+          .outputs(exit, collatBox)
+          .fee(Kit.TX_FEE).sendChangeTo(bAddr).build()
+      }
+      Kit.expectScriptFalse("E14 repay routing the collateral token to a stranger (keeper box)") {
+        b.sign(repay14(kAddr))
+      }
+      Kit.expectReduces("E14-twin same repay with the collateral to a borrower-script output reduces") {
+        b.reduce(repay14(bAddr), 0).getCost
+      }
+      ()
+    }
+
+    // =====================================================================
+    println("=== E15: look-alike card (TERMS_BOX_HASH pin, A-M5) ===")
+    // The pinned NFT proves WHICH box; the script hash proves the box is
+    // governed by the refuel-only card guard. Without the second check a
+    // publisher could mint the pinned NFT into a mutable look-alike and
+    // reprice orders that were posted but not yet matched.
+    Kit.exec { ctx =>
+      val l     = TestLib.lender(ctx)
+      val bAddr = TestLib.borrower(ctx).getEip3Addresses.get(0)
+      val fakeNft = ErgoId.create("99" * 32)
+      val o15     = P4.postOrderV3(cardPin = fakeNft.getBytes, label = "E15 post pinned order")
+      val o15Box  = ctx.getBoxesById(o15)(0)
+      // Same NFT, same R4-R9 anatomy, WRONG script: a plain P2PK box the
+      // publisher can rewrite at will.
+      val lookAlike = P4.fabCard(ctx, fakeNft, P4.CARD_A_R7, P4.explicitCardR8,
+        contractOverride = Some(bAddr.toErgoContract))
+      val realShape = P4.fabCard(ctx, fakeNft, P4.CARD_A_R7, P4.explicitCardR8)
+      Kit.expectScriptFalse("E15 look-alike card (right NFT + anatomy, not the card script) unmatchable") {
+        l.sign(P4.buildMatchV3(ctx, o15Box, vaultBytes, TestLib.TERM_LONG, Some(lookAlike),
+          preHeaderHeight = Some(Kit.nodeHeight())))
+      }
+      Kit.expectReduces("E15-twin identical card anatomy AT the card script reduces") {
+        l.reduce(P4.buildMatchV3(ctx, o15Box, vaultBytes, TestLib.TERM_LONG, Some(realShape),
+          preHeaderHeight = Some(Kit.nodeHeight())), 0).getCost
+      }
+      P4.cancelOrderV3(o15, "E15 cleanup cancel")
+      ()
+    }
+
+    // =====================================================================
     println("=== Phase 4 E-wall COMPLETE ===")
-    println(s"    cards untouched on-chain (refuel-only held): A $cAId  B $cBId  C $cCId")
+    println(s"    cards untouched on-chain (refuel-only held): A $cAId  B $cBId  C $cCId  H $cHId")
     println("    E1 refuel guard, E2 forged card, E3 sentinel fallback, E4 card bounds,")
-    println("    E5 borrower-auth co-spend, E6 R8 pack sizes, E7 attestation gate,")
-    println("    E8 liquidation hook, E9 card-less baseline: all negatives cleanly")
-    println("    rejected, all twins reduced; every posted order cancelled with RSN")
-    println("    returned on its own min-box; no malformed transaction was submitted")
+    println("    E5 borrower-auth co-spend (+E5f SELF exclusion), E6 R8 pack sizes and")
+    println("    the rev-4 lender reveal (E6i-E6m), E7 attestation gate, E8 liquidation")
+    println("    hook, E9 card-less baseline, E11 card-blessed hooks + var-1 reveal,")
+    println("    E12 card-less hook ban, E13 fabricated pool, E14 repay collateral pin,")
+    println("    E15 look-alike card: all negatives cleanly rejected, all twins reduced;")
+    println("    every posted order cancelled with RSN returned on its own min-box; no")
+    println("    malformed transaction was submitted (E10 runs as its own main)")
+    println(s"    E10 resume: runMain bonds.Phase4WallE10 $cHId $cHNft")
     ()
   }
 
-  /** Optional args are (cardBoxId, cardNftId) pairs for A, B, C in order —
-    * resume mode for interrupted runs / RunPhase4 hand-off. */
+  /** Optional args are (cardBoxId, cardNftId) pairs for A, B, C, H in
+    * order — resume mode for interrupted runs / RunPhase4 hand-off. */
   def main(args: Array[String]): Unit = {
     require(args.isEmpty || args.length % 2 == 0,
-      "usage: Phase4WallE [cardABoxId cardANftId [cardBBoxId cardBNftId [cardCBoxId cardCNftId]]]")
+      "usage: Phase4WallE [cardABox cardANft [cardBBox cardBNft [cardCBox cardCNft [cardHBox cardHNft]]]]")
     val pairs = args.toSeq.grouped(2).collect { case Seq(bx, nft) => (bx, nft) }.toSeq
-    run(pairs.lift(0), pairs.lift(1), pairs.lift(2))
+    run(pairs.lift(0), pairs.lift(1), pairs.lift(2), pairs.lift(3))
+  }
+}
+
+/** E10 — the hook-pinned bond, END TO END on mainnet dust. This is the
+  * only rev-4 test that moves real value through the hook path, so it is
+  * its own main (E-wall discipline: run() never submits a bond spend).
+  *
+  * Closes the last REV4-TODO: mint a card that BLESSES a hook script,
+  * post a hook-pinned covenant order, match it WITH both reveals (order
+  * ctx-ext var 0 = lender script, var 1 = hook script), let it run to
+  * maturity, then liquidate through the hook — where the bond input
+  * carries its OWN var 0 = the hook script (the index collision: same
+  * index, different box, different meaning — builders must never share a
+  * constant between the two sites).
+  *
+  * The hook here is the MinimalLenderVault (lender-owned), chosen because
+  * it is a real script the lender can sweep afterwards: the collateral
+  * RSN is returned to the borrower wallet in the final step so the
+  * covenant fixtures stay funded for later suites.
+  *
+  * Usage: Phase4WallE10 [cardHBoxId cardHNftId]
+  */
+object Phase4WallE10 {
+  import Contracts._
+
+  val COLLATERAL: Long = MIN_ORDER_VALUE      // 0.010 ERG net of escrow
+  val PRINCIPAL:  Long = 10000000L
+  val REPAYMENT:  Long = 15000000L
+  val RSN_AMT:    Long = 700L
+  val TERM:       Int  = 12                   // K = 2, escrow = 2 bounties
+  val PERIOD:     Long = 4L
+  val THRESHOLD:  Long = 15000L
+
+  def main(args: Array[String]): Unit = {
+    require(args.isEmpty || args.length == 2,
+      "usage: Phase4WallE10 [cardHBoxId cardHNftId]")
+    println("=== E10: hook-pinned bond end-to-end (mint -> match with reveals -> hooked liquidation) ===")
+
+    val vault      = TestLib.vaultTree()
+    val vaultBytes = vault.bytes
+    val hookHash   = P4.h32(vaultBytes)
+    val lenderP2pk = Kit.exec { ctx =>
+      TestLib.verifyWallets(ctx)
+      TestLib.lender(ctx).getEip3Addresses.get(0).toErgoContract.getErgoTree
+    }
+
+    // 1. The blessing card: card A's tier plus the hook hash at R8(4).
+    val (cardBox, cardNft) =
+      if (args.length == 2) (args(0), args(1))
+      else P4.mintCard("c-bonds hooked",
+        "rev-4 card H: card A's tier, blessing the lender-vault liquidation hook",
+        P4.CARD_A_R7,
+        P4.cardR8WithHooks(ErgoId.create(POOL_NFT).getBytes,
+          ErgoId.create(COLLATERAL_TOKEN_ID).getBytes, Seq(hookHash)),
+        "E10 card-mint-H")
+    println(s"  card H $cardBox  NFT $cardNft  blesses hook ${TestLib.hex(hookHash).take(16)}…")
+
+    // 2. Hook-pinned covenant order (a hook presupposes the covenant, so
+    // the collateral is the pinned pool's traded token).
+    val orderId = P4.postOrderV3(
+      collateral = COLLATERAL, principal = PRINCIPAL, repayment = REPAYMENT,
+      term = TERM, collTokens = Seq(new ErgoToken(P3.RSN_ID, RSN_AMT)),
+      period = PERIOD, thresholdBps = THRESHOLD,
+      cardPin = ErgoId.create(cardNft).getBytes, hookHash = Some(hookHash),
+      label = "E10 post hook-pinned covenant order")
+
+    // 3. Match WITH both reveals on the ORDER input.
+    val (bondId, maturity) = P4.doMatchV3(orderId, lenderP2pk.bytes, TERM,
+      Some(cardBox), "E10 match (carded, hook-pinned, var-0 + var-1 reveals)",
+      hookScriptBytes = Some(vaultBytes))
+
+    // The reveals are part of the serialized match tx: assert the bond's
+    // committed hashes and that both preimages are recoverable from chain
+    // history (the whole point of D1/D3 — any future liquidator can
+    // rebuild the destinations without asking anyone).
+    Kit.exec { ctx =>
+      val bond = ctx.getBoxesById(bondId)(0)
+      val r8   = P4.bondR8Of(bond)
+      require(r8.size == 3, s"E10: bond R8 pack size ${r8.size}, want 3 (lenderHash, poolNFT, hookHash)")
+      require(java.util.Arrays.equals(r8(0), P4.h32(lenderP2pk.bytes)), "E10: R8(0) != blake2b256(lender)")
+      require(java.util.Arrays.equals(r8(2), hookHash), "E10: R8(2) != blake2b256(hook)")
+      val boxJson = Kit.httpGet(s"/blockchain/box/byId/$bondId")
+      val matchTxId = """"transactionId"\s*:\s*"([0-9a-f]{64})"""".r
+        .findFirstMatchIn(boxJson).map(_.group(1))
+        .getOrElse(sys.error("E10: no transactionId on the bond box"))
+      val matchTx = Kit.httpGet(s"/blockchain/transaction/byId/$matchTxId")
+      require(matchTx.contains(TestLib.hex(lenderP2pk.bytes)), "E10: lender preimage not in the match tx")
+      require(matchTx.contains(TestLib.hex(vaultBytes)), "E10: hook preimage not in the match tx")
+      println("  PASS E10 reveal assert — both preimages recoverable from the confirmed match tx")
+      ()
+    }
+
+    // 4. Maturity, then the hooked liquidation: signatureless, keeper-built,
+    // destination rebound to the hook script by ctx-ext var 0 ON THE BOND.
+    Kit.waitForHeight(maturity + 2)
+    val exitId = P4.doHookedLiquidation(bondId, vaultBytes,
+      "E10 hooked liquidation (destination rebind, bond var 0)")
+
+    // 5. Return the collateral: the hook is the lender's own vault, so the
+    // lender sweeps the exit box, sending the RSN back to the borrower
+    // wallet (covenant fixtures stay funded) and keeping the ERG.
+    Kit.exec { ctx =>
+      val l     = TestLib.lender(ctx)
+      val lAddr = l.getEip3Addresses.get(0)
+      val bAddr = TestLib.borrower(ctx).getEip3Addresses.get(0)
+      val exit  = ctx.getBoxesById(exitId)(0)
+      val tb    = ctx.newTxBuilder()
+      val rsnOut = tb.outBoxBuilder()
+        .value(Kit.MIN_BOX_VALUE)
+        .contract(bAddr.toErgoContract)
+        .tokens(new ErgoToken(P3.RSN_ID, RSN_AMT))
+        .build()
+      val ergOut = tb.outBoxBuilder()
+        .value(exit.getValue - Kit.MIN_BOX_VALUE - Kit.TX_FEE)
+        .contract(lAddr.toErgoContract)
+        .tokens(new ErgoToken(exit.getTokens.get(0).getId, 1L))  // loan-token receipt
+        .build()
+      val txId = Kit.sendSafe(ctx, l.sign(tb.boxesToSpend(java.util.Arrays.asList(exit))
+        .outputs(rsnOut, ergOut).fee(Kit.TX_FEE).sendChangeTo(lAddr).build()),
+        "E10 hook sweep (RSN back to borrower)")
+      Kit.waitConfirmed(txId, "E10 hook sweep")
+      ()
+    }
+
+    println(s"=== E10 COMPLETE: card $cardBox -> order $orderId -> bond $bondId -> hook exit $exitId ===")
   }
 }

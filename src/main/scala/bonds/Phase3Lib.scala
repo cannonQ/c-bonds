@@ -269,10 +269,14 @@ object P3 {
   // ---------------- acceleration ----------------
 
   /** Signatureless acceleration of a grace-blown, still-unhealthy bond:
-    * liquidation shape to the R8 script with the pool data input. The
+    * liquidation shape to the lender script with the pool data input. The
     * carve-out funds fee + keeper box (zero-capital). Returns exit box id.
+    *
+    * Rev 4: the bond's R8(0) is only the HASH of the lender script, so the
+    * destination is threaded in as `lenderTree` (the full script the
+    * harness compiled) and checked against the register before building.
     */
-  def doAccelerate(bondBoxId: String, jitLabel: String,
+  def doAccelerate(bondBoxId: String, lenderTree: Array[Byte], jitLabel: String,
                    proverOf: BlockchainContext => ErgoProver = TestLib.keeper): String =
     Kit.exec { ctx =>
       val bondBox = ctx.getBoxesById(bondBoxId)(0)
@@ -283,15 +287,14 @@ object P3 {
         repaymentOf(bondBox), s(4)),
         s"$jitLabel: bond prices healthy — acceleration must not fire")
 
-      val lenderTree = P4.lenderTreeBytesOf(bondBox)   // rev 3: R8 pack element 0
+      require(java.util.Arrays.equals(P4.h32(lenderTree), P4.lenderHashOf(bondBox)),
+        s"$jitLabel: lenderTree does not hash to the bond's R8(0)")
       val p     = proverOf(ctx)
       val payTo = p.getEip3Addresses.get(0)
       val tb    = ctx.newTxBuilder()
       val exit = tb.outBoxBuilder()
         .value(bondBox.getValue - LIQ_CARVEOUT)
-        .contract(new ErgoTreeContract(
-          sigmastate.serialization.ErgoTreeSerializer.DefaultSerializer.deserializeErgoTree(lenderTree),
-          NetworkType.MAINNET))
+        .contract(P4.contractFromBytes(lenderTree))
         .tokens(bondBox.getTokens.asScala.toSeq: _*)
         .registers(ErgoValue.of(bondBox.getId.getBytes))
         .build()

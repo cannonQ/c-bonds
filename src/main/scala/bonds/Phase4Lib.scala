@@ -6,10 +6,24 @@ import org.ergoplatform.appkit.impl.ErgoTreeContract
 import scala.collection.JavaConverters._
 
 /** Phase 4 / rev-3 shared flows: the card (terms box) lifecycle, the
-  * rev-3 register layouts (R5 borrower script bytes, R8 Coll[Coll[Byte]]
-  * suffix pack, R9 extended Long pack), the coupon and missed-payment
-  * paths, and the card-resolution mirror. Layout per REV3-LAYOUT.md
-  * (signed off 2026-08-07); gates per PHASE4-DECISIONS.md.
+  * rev-3 register layouts (R5 borrower script HASH, R8 Coll[Coll[Byte]]
+  * suffix pack whose element 0 is the lender script HASH, R9 extended
+  * Long pack), the coupon and missed-payment paths, and the
+  * card-resolution mirror. Layout per REV3-LAYOUT.md (signed off
+  * 2026-08-07) as amended by REV4-DECISIONS.md D1/D3; gates per
+  * PHASE4-DECISIONS.md.
+  *
+  * REV 4 (D1/D2/D3): the bond stores blake2b256 of the counterparty
+  * ErgoTrees, not the trees themselves — bond box size is independent of
+  * counterparty script size. Two harness consequences:
+  *   - every site that CREATES a bond register writes h32(script);
+  *     successor rebuilds that copy registers verbatim already carry the
+  *     hash and are unchanged;
+  *   - no destination can be read back out of a bond register any more.
+  *     Payment builders take the FULL lender script as a parameter,
+  *     threaded from the tree the harness itself compiled/holds.
+  * The match reveals both preimages via context-extension vars on the
+  * ORDER input (orderWithMatchVars below).
   *
   * Every resolved value the harness expects is computed by the SAME
   * sentinel-fallback rules the order contract applies, so harness and
@@ -37,21 +51,70 @@ object P4 {
     coll.toArray.map(_.toArray).toSeq
   }
 
-  /** Bond R8 suffix pack [lenderScript, poolNFT?, liqHookHash?, attesterHash?]. */
+  /** Bond R8 suffix pack [lenderHash, poolNFT?, liqHookHash?, attesterHash?]
+    * (rev 4: element 0 is a 32-byte hash, not the lender script bytes). */
   def bondR8Of(box: InputBox): Seq[Array[Byte]] = packOf(box, 4)
 
-  /** Bond R5 / order R4 borrower script bytes. */
+  /** Order R4 borrower script BYTES (unchanged in rev 4 — the order still
+    * carries the full tree; only the BOND stores the hash). Also decodes
+    * bond R5, which since rev 4 holds the 32-byte hash of those bytes. */
   def borrowerBytesOf(box: InputBox, regIdx: Int): Array[Byte] =
     box.getRegisters.get(regIdx).getValue.asInstanceOf[sigma.Coll[Byte]].toArray
 
-  def treeFromBytes(bytes: Array[Byte]): sigmastate.Values.ErgoTree =
-    sigmastate.serialization.ErgoTreeSerializer.DefaultSerializer.deserializeErgoTree(bytes)
+  def treeFromBytes(bytes: Array[Byte]): sigma.ast.ErgoTree =
+    sigma.serialization.ErgoTreeSerializer.DefaultSerializer.deserializeErgoTree(bytes)
 
   def contractFromBytes(bytes: Array[Byte]): ErgoTreeContract =
     new ErgoTreeContract(treeFromBytes(bytes), NetworkType.MAINNET)
 
-  /** Lender destination of a rev-3 bond: R8 pack element 0. */
-  def lenderTreeBytesOf(box: InputBox): Array[Byte] = bondR8Of(box).head
+  // ---------------- rev-4 script hashes (REV4-DECISIONS D1/D2/D3) ----------------
+
+  /** blake2b256 of script bytes as a plain Array[Byte]: the value bond R5
+    * (borrower) and bond R8(0) (lender) hold since rev 4. Registers take
+    * Array[Byte] through the usual ErgoValue.of path — only compiler
+    * constants need sigma.Colls. */
+  def h32(bytes: Array[Byte]): Array[Byte] =
+    scorex.crypto.hash.Blake2b256(bytes).asInstanceOf[Array[Byte]]
+
+  /** Bond R8(0): the lender script HASH. There is no longer a
+    * `lenderTreeBytesOf` — the full script is not on the bond, and every
+    * payment builder takes it as a parameter instead (rev 4). */
+  def lenderHashOf(box: InputBox): Array[Byte] = bondR8Of(box).head
+
+  /** Rev-4 match reveal (D1/D3). The order input carries context-extension
+    * var 0 = the FULL lender script (preimage of the hash the match writes
+    * to bond R8(0)) and, when the order pins a liquidation hook (pin pack
+    * size >= 2), var 1 = the full hook script. Context extensions, never
+    * data inputs: zero D-I surface, same class as the bond's liq hook.
+    *
+    * Exercised end-to-end by E10 (hook-pinned order -> match with both
+    * reveals -> hooked liquidation at maturity); the reveal negatives are
+    * E6k/E6l (var 0) and E11a/E11b (var 1).
+    *
+    * INDEX COLLISION WARNING (audit B-I* / REV4-LAYOUT): the ORDER input
+    * reads var 0 = lender and var 1 = hook AT MATCH; the BOND input reads
+    * var 0 = hook AT LIQUIDATION. Same index, different meaning, different
+    * box — builders must never share one constant between the two sites.
+    *
+    * `dropLenderVar` / `dropHookVar` model the ABSENT-reveal negatives;
+    * `lenderRevealOverride` models a wrong (non-preimage) reveal. */
+  def orderWithMatchVars(orderBox: InputBox, lenderScriptBytes: Array[Byte],
+                         hookScriptBytes: Option[Array[Byte]] = None,
+                         dropLenderVar: Boolean = false,
+                         dropHookVar: Boolean = false,
+                         lenderRevealOverride: Option[Array[Byte]] = None): InputBox = {
+    val pinPack = packOf(orderBox, 4)
+    val lenderVar =
+      if (dropLenderVar) Nil
+      else Seq(new ContextVar(0.toByte,
+        ErgoValue.of(lenderRevealOverride.getOrElse(lenderScriptBytes))))
+    val hookVar =
+      if (dropHookVar || pinPack.size < 2) Nil
+      else Seq(new ContextVar(1.toByte,
+        ErgoValue.of(hookScriptBytes.getOrElse(Array.emptyByteArray))))
+    val vars = lenderVar ++ hookVar
+    if (vars.isEmpty) orderBox else orderBox.withContextVars(vars: _*)
+  }
 
   // ---------------- R9 extended-pack accessors (sentinel fallback) ----------------
 
@@ -182,13 +245,18 @@ object P4 {
       (cardId, nftId.toString)
     }
 
-  /** Fabricated card box (local reduce tests only, never submitted). */
+  /** Fabricated card box (local reduce tests only, never submitted).
+    * `contractOverride` builds the E15 LOOK-ALIKE: the pinned NFT and the
+    * whole card anatomy on a box that is NOT governed by the refuel-only
+    * card script — what the rev-4 TERMS_BOX_HASH conjunct (A-M5) exists
+    * to reject. */
   def fabCard(ctx: BlockchainContext, nftId: ErgoId, r7: Array[Long],
-              r8Fields: Seq[Array[Byte]], value: Long = Kit.MIN_BOX_VALUE): InputBox = {
+              r8Fields: Seq[Array[Byte]], value: Long = Kit.MIN_BOX_VALUE,
+              contractOverride: Option[ErgoContract] = None): InputBox = {
     val (_, cardContract) = Contracts.termsBox(ctx)
     ctx.newTxBuilder().outBoxBuilder()
       .value(value)
-      .contract(cardContract)
+      .contract(contractOverride.getOrElse(cardContract))
       .tokens(new ErgoToken(nftId, 1L))
       .registers(
         ErgoValue.of("fab".getBytes("UTF-8")),
@@ -317,10 +385,16 @@ object P4 {
       orderId
     }
 
-  /** Rev-3 match: bond R5 = borrower bytes copied from order R4, R8 =
-    * suffix pack sized by covenant/hook shape, R9 = 6 (card-less) or 10
-    * (carded, resolved values) elements. Card rides as dataInputs(0) when
-    * pinned. Every field is override-able for the E-wall. */
+  /** Rev-3/4 match: bond R5 = blake2b256 of the borrower bytes in order
+    * R4, R8 = suffix pack sized by covenant/hook shape with the lender
+    * script HASH at element 0, R9 = 6 (card-less) or 10 (carded, resolved
+    * values) elements. Card rides as dataInputs(0) when pinned; the FULL
+    * lender script (and the hook script, when the order pins one) ride as
+    * context-extension vars 0/1 on the ORDER input — the rev-4 reveal.
+    * `lenderScriptBytes` and `hookScriptBytes` are still the FULL scripts:
+    * this builder does the hashing, so every caller keeps passing the tree
+    * it compiled. Every register is override-able for the E-wall, and
+    * overrides are taken VERBATIM (a wall that wants a hash passes one). */
   def buildMatchV3(ctx: BlockchainContext, orderBox: InputBox,
                    lenderScriptBytes: Array[Byte], term: Int,
                    card: Option[InputBox],
@@ -328,6 +402,10 @@ object P4 {
                    bondR8Override: Option[Seq[Array[Byte]]] = None,
                    bondSchedOverride: Option[Array[Long]] = None,
                    bondR5Override: Option[Array[Byte]] = None,
+                   hookScriptBytes: Option[Array[Byte]] = None,
+                   dropLenderVar: Boolean = false,
+                   dropHookVar: Boolean = false,
+                   lenderRevealOverride: Option[Array[Byte]] = None,
                    preHeaderHeight: Option[Int] = None): UnsignedTransaction = {
     val l     = TestLib.lender(ctx)
     val lAddr = l.getEip3Addresses.get(0)
@@ -350,14 +428,18 @@ object P4 {
       if (card.isDefined) base ++ res.suffix else base)
 
     val covenantOn = tmpl(4) != 0L
+    val lenderHash = h32(lenderScriptBytes)          // rev 4: R8(0) is the hash
     val r8Pack = bondR8Override.getOrElse(
       (covenantOn, hook) match {
-        case (true, Some(h)) => Seq(lenderScriptBytes, poolNft, h)
-        case (true, None)    => Seq(lenderScriptBytes, poolNft)
-        case (false, _)      => Seq(lenderScriptBytes)
+        case (true, Some(h)) => Seq(lenderHash, poolNft, h)
+        case (true, None)    => Seq(lenderHash, poolNft)
+        case (false, _)      => Seq(lenderHash)
       })
 
-    val bBytes = bondR5Override.getOrElse(borrowerBytesOf(orderBox, 0))
+    // rev 4: R5 is the hash of the order's borrower bytes, not a copy.
+    val bBytes = bondR5Override.getOrElse(h32(borrowerBytesOf(orderBox, 0)))
+    val orderIn = orderWithMatchVars(orderBox, lenderScriptBytes, hookScriptBytes,
+      dropLenderVar, dropHookVar, lenderRevealOverride)
     val funds  = Kit.selectBoxes(ctx, lAddr, principal + Kit.TX_FEE + Kit.MIN_BOX_VALUE)
     val tb = preHeaderHeight match {
       case Some(h) => ctx.newTxBuilder().preHeader(ctx.createPreHeader().height(h).build())
@@ -369,15 +451,17 @@ object P4 {
       .tokens((new ErgoToken(orderBox.getId, 1L) +: orderBox.getTokens.asScala.toSeq): _*)
       .registers(
         ErgoValue.of(orderBox.getId.getBytes), // R4 order box id
-        ErgoValue.of(bBytes),                  // R5 borrower script bytes
+        ErgoValue.of(bBytes),                  // R5 blake2b256(borrower tree)
         ErgoValue.of(repayment),               // R6
         ErgoValue.of(maturity),                // R7
-        packValue(r8Pack),                     // R8 suffix pack
+        packValue(r8Pack),                     // R8 suffix pack [lenderHash, ...]
         ErgoValue.of(sched)                    // R9 (6 or 10 elements)
       ).build()
+    // The principal still pays the FULL borrower script — read from the
+    // ORDER's R4, which keeps the bytes (only the bond stores the hash).
     val principalOut = tb.outBoxBuilder().value(principal)
       .contract(contractFromBytes(borrowerBytesOf(orderBox, 0))).build()
-    var builder = tb.boxesToSpend((Seq(orderBox) ++ funds).asJava)
+    var builder = tb.boxesToSpend((Seq(orderIn) ++ funds).asJava)
     if (card.isDefined && !dropDataInput)
       builder = builder.withDataInputs(java.util.Arrays.asList(card.get))
     builder.outputs(bondOut, principalOut)
@@ -386,13 +470,15 @@ object P4 {
 
   /** Sign, submit, confirm an honest rev-3 match. Returns (bondId, maturity). */
   def doMatchV3(orderBoxId: String, lenderScriptBytes: Array[Byte], term: Int,
-                cardBoxId: Option[String], jitLabel: String): (String, Int) =
+                cardBoxId: Option[String], jitLabel: String,
+                hookScriptBytes: Option[Array[Byte]] = None): (String, Int) =
     Kit.exec { ctx =>
       val l        = TestLib.lender(ctx)
       val orderBox = ctx.getBoxesById(orderBoxId)(0)
       val card     = cardBoxId.map(id => ctx.getBoxesById(id)(0))
       val maturity = Kit.nodeHeight() + term
-      val unsigned = buildMatchV3(ctx, orderBox, lenderScriptBytes, term, card)
+      val unsigned = buildMatchV3(ctx, orderBox, lenderScriptBytes, term, card,
+        hookScriptBytes = hookScriptBytes)
       Jit.record(jitLabel, l.reduce(unsigned, 0).getCost.toLong)
       val signed = l.sign(unsigned)
       val bondId = signed.getOutputsToSpend.get(0).getId.toString
@@ -429,13 +515,16 @@ object P4 {
   val DUMMY_TX  = "f9e5ce5aa0d95f5d54a7bc89c46730d9662397067250aa18a0039631c0f5b809"
   val FAKE_LOAN = "44" * 32
 
-  /** Fabricated rev-3 bond box: R5 borrower bytes, R8 pack, extended R9.
-    * Defaults model a conforming covenant-off bullet; every field is
-    * override-able so the walls can fabricate any shape. */
+  /** Fabricated rev-3/4 bond box. Register values are written VERBATIM —
+    * this is the walls' "fabricate any shape" primitive, so it does NOT
+    * hash for you: under rev 4 a conforming fab passes h32(borrowerTree)
+    * as `borrowerHash` and h32(lenderTree) at r8Pack element 0, while a
+    * malformed-shape test passes whatever it means to test.
+    * Defaults model a conforming covenant-off bullet. */
   def fabBondV3(ctx: BlockchainContext,
                 sched: Array[Long],
                 r8Pack: Seq[Array[Byte]],
-                borrowerBytes: Array[Byte],
+                borrowerHash: Array[Byte],
                 value: Long,
                 repayment: Long,
                 maturity: Int,
@@ -450,7 +539,7 @@ object P4 {
       .tokens(toks: _*)
       .registers(
         ErgoValue.of(fakeId.getBytes),
-        ErgoValue.of(borrowerBytes),
+        ErgoValue.of(borrowerHash),
         ErgoValue.of(repayment),
         ErgoValue.of(maturity),
         packValue(r8Pack),
@@ -496,14 +585,19 @@ object P4 {
     succR8Override: Option[ErgoValue[_]] = None,
     succContractOverride: Option[ErgoTreeContract] = None)
 
-  def honestCouponPlan(bondBox: InputBox, healthyBranch: Boolean): CouponPlan = {
+  /** `lenderTree` is the FULL lender script (rev 4: the bond only carries
+    * its hash at R8(0), so the destination comes from the harness). */
+  def honestCouponPlan(bondBox: InputBox, lenderTree: Array[Byte],
+                       healthyBranch: Boolean): CouponPlan = {
     val s = TestLib.schedOf(bondBox)
+    require(java.util.Arrays.equals(h32(lenderTree), lenderHashOf(bondBox)),
+      "honestCouponPlan: lenderTree does not hash to the bond's R8(0)")
     CouponPlan(
       succValue  = bondBox.getValue - bountyOf(s),
       succTokens = bondBox.getTokens.asScala.toSeq,
       succR9     = if (healthyBranch) couponAdvancePack(s) else couponCurePack(s),
       instValue  = s(0),
-      instTree   = lenderTreeBytesOf(bondBox),
+      instTree   = lenderTree,
       instR4     = Some(bondBox.getId.getBytes))
   }
 
@@ -551,7 +645,7 @@ object P4 {
   /** Sign, submit, confirm an honest coupon; verifies the successor and
     * the installment receipt on-chain. Payer defaults to the borrower;
     * D15 passes the keeper (third-party liveness proof). */
-  def doCoupon(bondBoxId: String, jitLabel: String,
+  def doCoupon(bondBoxId: String, lenderTree: Array[Byte], jitLabel: String,
                proverOf: BlockchainContext => ErgoProver = TestLib.borrower,
                expectHealthy: Boolean = true,
                attempts: Int = 3): String = {
@@ -574,7 +668,7 @@ object P4 {
           }
           val p     = proverOf(ctx)
           val payer = p.getEip3Addresses.get(0)
-          val plan  = honestCouponPlan(bondBox, isHealthy)
+          val plan  = honestCouponPlan(bondBox, lenderTree, isHealthy)
           val unsigned = buildCoupon(ctx, bondBox, plan, pool, payer)
           Jit.record(jitLabel, p.reduce(unsigned, 0).getCost.toLong)
           val signed = p.sign(unsigned)
@@ -622,11 +716,14 @@ object P4 {
     // absorbs bond - exitValue - fee, so lowering exitValue IS the split.
     splitToKeeper: Long = 0L)
 
-  def honestMissedAccelPlan(bondBox: InputBox): MissedAccelPlan = {
+  /** `lenderTree` is the FULL lender script (rev 4: bond R8(0) is a hash). */
+  def honestMissedAccelPlan(bondBox: InputBox, lenderTree: Array[Byte]): MissedAccelPlan = {
     val s = TestLib.schedOf(bondBox)
+    require(java.util.Arrays.equals(h32(lenderTree), lenderHashOf(bondBox)),
+      "honestMissedAccelPlan: lenderTree does not hash to the bond's R8(0)")
     MissedAccelPlan(
       exitValue = bondBox.getValue - carveOf(s),
-      exitTree  = lenderTreeBytesOf(bondBox),
+      exitTree  = lenderTree,
       receiptR4 = Some(bondBox.getId.getBytes),
       tokens    = bondBox.getTokens.asScala.toSeq)
   }
@@ -657,14 +754,14 @@ object P4 {
   }
 
   /** Sign, submit, confirm an honest missed-payment acceleration. */
-  def doMissedAccel(bondBoxId: String, jitLabel: String,
+  def doMissedAccel(bondBoxId: String, lenderTree: Array[Byte], jitLabel: String,
                     proverOf: BlockchainContext => ErgoProver = TestLib.keeper): String =
     Kit.exec { ctx =>
       val bondBox = ctx.getBoxesById(bondBoxId)(0)
       val s       = TestLib.schedOf(bondBox)
       require(s(0) > 0L && s(3) > 0L && s(2) > 1L, s"$jitLabel: not a missed-coupon state")
       val p        = proverOf(ctx)
-      val plan     = honestMissedAccelPlan(bondBox)
+      val plan     = honestMissedAccelPlan(bondBox, lenderTree)
       val unsigned = buildMissedAccel(ctx, bondBox, plan, p.getEip3Addresses.get(0))
       Jit.record(jitLabel, p.reduce(unsigned, 0).getCost.toLong)
       val signed = p.sign(unsigned)
@@ -715,7 +812,7 @@ object P4 {
 
   /** A box at an arbitrary script modeling an attester verdict:
     * R4 = loan token id, R5 = |checkpoint|, R6 = 1 pass / 0 fail. */
-  def fabAttesterBox(ctx: BlockchainContext, attesterTree: sigmastate.Values.ErgoTree,
+  def fabAttesterBox(ctx: BlockchainContext, attesterTree: sigma.ast.ErgoTree,
                      loanId: Array[Byte], checkpoint: Long, pass: Boolean): InputBox =
     ctx.newTxBuilder().outBoxBuilder()
       .value(Kit.MIN_BOX_VALUE)
@@ -726,4 +823,68 @@ object P4 {
         ErgoValue.of(if (pass) 1L else 0L))
       .build()
       .convertToInputWith(DUMMY_TX, 2)
+
+  // ---------------- rev-4 card-blessed hooks (A-H1/B-H2) ----------------
+
+  /** Card R8 with the rev-4 blessed-hook suffix: indices 0/1 are the
+    * pool NFT and collateral id (sentinel-empty allowed), 2/3 stay empty
+    * (attester + reserved), and every entry from index 4 on is a
+    * blake2b256 hook-script hash the publisher blesses. Append-only and
+    * frozen by the card's refuel-only guard: hook and terms travel as one
+    * immutable bundle. */
+  def cardR8WithHooks(poolNft: Array[Byte], collatId: Array[Byte],
+                      hookHashes: Seq[Array[Byte]]): Seq[Array[Byte]] =
+    Seq(poolNft, collatId, Array.emptyByteArray, Array.emptyByteArray) ++ hookHashes
+
+  // ---------------- fake price source (E13) ----------------
+
+  /** A pool-SHAPED box that does not run the Spectrum script: 3 tokens
+    * (NFT, LP, traded token), an Int fee in R4, arbitrary reserves. The
+    * rev-4 SPECTRUM_POOL_HASH pin (B-M1b) is the only thing standing
+    * between this and a fabricated verdict. */
+  def fabPoolBox(ctx: BlockchainContext, contract: ErgoContract,
+                 poolNft: ErgoId, lpId: ErgoId, tradedId: ErgoId,
+                 rX: Long, rY: Long, feeNum: Int): InputBox =
+    ctx.newTxBuilder().outBoxBuilder()
+      .value(rX)
+      .contract(contract)
+      .tokens(new ErgoToken(poolNft, 1L), new ErgoToken(lpId, 1000000L),
+        new ErgoToken(tradedId, rY))
+      .registers(ErgoValue.of(feeNum))
+      .build()
+      .convertToInputWith(DUMMY_TX, 4)
+
+  // ---------------- hooked liquidation, on-chain (E10) ----------------
+
+  /** Sign, submit and confirm a hooked liquidation: the exit box rebinds
+    * to the hook script whose hash sits at bond R8(2), preimage supplied
+    * as ctx-ext var 0 ON THE BOND INPUT (not the order's var 0 — see the
+    * index-collision warning on orderWithMatchVars). Signatureless: any
+    * keeper can build it. Returns the exit box id. */
+  def doHookedLiquidation(bondBoxId: String, hookBytes: Array[Byte], jitLabel: String,
+                          proverOf: BlockchainContext => ErgoProver = TestLib.keeper): String =
+    Kit.exec { ctx =>
+      val bondBox = ctx.getBoxesById(bondBoxId)(0)
+      val r8      = bondR8Of(bondBox)
+      require(r8.size >= 3 && java.util.Arrays.equals(h32(hookBytes), r8(2)),
+        s"$jitLabel: hookBytes do not hash to the bond's R8(2)")
+      require(Kit.nodeHeight() >= bondBox.getRegisters.get(3).getValue.asInstanceOf[Int],
+        s"$jitLabel: liquidation arm opens at maturity")
+      val p        = proverOf(ctx)
+      val unsigned = buildHookedLiquidation(ctx, bondBox, hookBytes, p.getEip3Addresses.get(0))
+      Jit.record(jitLabel, p.reduce(unsigned, 0).getCost.toLong)
+      val signed = p.sign(unsigned)
+      require(signed.getSignedInputs.size == 1,
+        "hooked liquidation must be self-funding (bond sole input)")
+      val exitId = signed.getOutputsToSpend.get(0).getId.toString
+      val txId   = Kit.sendSafe(ctx, signed, jitLabel)
+      Kit.waitConfirmed(txId, jitLabel)
+      val exit = Kit.httpGet(s"/blockchain/box/byId/$exitId")
+      require(exit.contains(TestLib.hex(hookBytes)),
+        s"$jitLabel: exit box is not at the hook script")
+      require(exit.contains("0e20" + bondBoxId),
+        s"$jitLabel: exit box carries no R4 settlement receipt")
+      println(s"  hooked liquidation on-chain: exit $exitId (destination rebound to the hook)")
+      exitId
+    }
 }

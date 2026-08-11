@@ -29,7 +29,10 @@ object Phase4Tail {
   }
 
   def runH(h1Start: String, h2: String,
-           lenderP2pkTree: sigmastate.Values.ErgoTree): Unit = {
+           lenderP2pkTree: sigma.ast.ErgoTree): Unit = {
+    // Rev 4: the bond carries only blake2b256 of this tree, so every
+    // coupon / acceleration destination is threaded from here.
+    val lenderTreeBytes = lenderP2pkTree.bytes
     var h1 = h1Start
     println("=== H1: carded covenant installment loan (tail resume) ===")
     // Pay every remaining interior coupon keeper-side, waiting on each
@@ -38,7 +41,7 @@ object Phase4Tail {
     while (s1(2) > 1L) {
       require(s1(3) > 0L, s"H1 tail: bond in cure state (${s1(3)}) — cure first")
       Kit.waitForHeight(s1(3).toInt + 2)
-      h1 = P4.doCoupon(h1, s"H1 coupon (payments ${s1(2)}, third-party keeper, D15)",
+      h1 = P4.doCoupon(h1, lenderTreeBytes, s"H1 coupon (payments ${s1(2)}, third-party keeper, D15)",
         proverOf = TestLib.keeper, expectHealthy = true)
       s1 = Kit.exec { ctx => TestLib.schedOf(ctx.getBoxesById(h1)(0)) }
     }
@@ -51,12 +54,12 @@ object Phase4Tail {
       val s = TestLib.schedOf(ctx.getBoxesById(h2)(0)); (s(3), P4.graceOf(s))
     }
     Kit.waitForHeight((h2chk + h2grace).toInt + 2)
-    val h2Exit = P4.doMissedAccel(h2, "H2 missed-accel (grace expiry)")
+    val h2Exit = P4.doMissedAccel(h2, lenderTreeBytes, "H2 missed-accel (grace expiry)")
     println(s"H2 complete: exit $h2Exit")
   }
 
   def runD4(lenderTreeBytes: Array[Byte],
-            lenderP2pkTree: sigmastate.Values.ErgoTree): Unit = {
+            lenderP2pkTree: sigma.ast.ErgoTree): Unit = {
     // ---- D4: the race, verbatim from RunPhase4 ----
     println("=== D4: late coupon vs missed-payment acceleration (mempool race) ===")
     val d4Order = P4.postOrderV3(
@@ -75,9 +78,9 @@ object Phase4Tail {
       val bAddr  = b.getEip3Addresses.get(0)
       val kAddr  = k.getEip3Addresses.get(0)
       val coupon = b.sign(P4.buildCoupon(ctx, bond,
-        P4.honestCouponPlan(bond, healthyBranch = true), None, bAddr))
+        P4.honestCouponPlan(bond, lenderTreeBytes, healthyBranch = true), None, bAddr))
       val accel  = k.sign(P4.buildMissedAccel(ctx, bond,
-        P4.honestMissedAccelPlan(bond), kAddr))
+        P4.honestMissedAccelPlan(bond, lenderTreeBytes), kAddr))
       require(accel.getSignedInputs.size == 1, "D4 accel must be self-funding")
       Kit.sendSafe(ctx, coupon, "D4 race coupon (late)")
       try { Kit.sendSafe(ctx, accel, "D4 race missed-accel") }
@@ -104,7 +107,7 @@ object Phase4Tail {
       var cur = succIfCoupon
       var s   = Kit.exec { ctx => TestLib.schedOf(ctx.getBoxesById(cur)(0)) }
       while (s(2) > 1L) {
-        cur = P4.doCoupon(cur, s"D4 cleanup coupon (payments ${s(2)})")
+        cur = P4.doCoupon(cur, lenderTreeBytes, s"D4 cleanup coupon (payments ${s(2)})")
         s   = Kit.exec { ctx => TestLib.schedOf(ctx.getBoxesById(cur)(0)) }
       }
       val d4Exit = TestLib.doExit(cur, lenderP2pkTree, asRepay = true,

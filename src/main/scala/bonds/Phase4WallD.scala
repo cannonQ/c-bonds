@@ -50,6 +50,11 @@ object Phase4WallD {
     val lenderTree    = lAddr.toErgoContract.getErgoTree
     val lenderBytes   = lenderTree.bytes
     val keeperBytes   = kAddr.toErgoContract.getErgoTree.bytes
+    // Rev 4: the BOND stores blake2b256 of the counterparty trees; the
+    // full bytes above stay the payment destinations everywhere.
+    val borrowerHash  = P4.h32(borrowerBytes)
+    val lenderHash    = P4.h32(lenderBytes)
+    val keeperHash    = P4.h32(keeperBytes)
     val poolNftBytes  = ErgoId.create(POOL_NFT).getBytes
     val pool          = P3.poolBox(ctx)
     val maturity      = h + 500
@@ -61,10 +66,10 @@ object Phase4WallD {
     // 3 bounties, checkpoint due 5 blocks ago -> coupon window OPEN at h
     // (sched(3) <= H < maturity), missed-accel CLOSED until h + 5.
     val schedOff = Array[Long](P4.INSTALLMENT, PERIOD, 4L, (h - 5).toLong, 0L, 15000000L)
-    val bondOff  = P4.fabBondV3(ctx, schedOff, Seq(lenderBytes), borrowerBytes,
+    val bondOff  = P4.fabBondV3(ctx, schedOff, Seq(lenderHash), borrowerHash,
       35000000L, REPAY, maturity)
     // covenantOff coupons take the advance pack unconditionally (decision 1)
-    val honestOff = P4.honestCouponPlan(bondOff, healthyBranch = true)
+    val honestOff = P4.honestCouponPlan(bondOff, lenderBytes, healthyBranch = true)
 
     // Covenant-ON instalment fixture pieces (Phase3Gate lines 52-66 recipe:
     // value 15M = 5M ERG leg + 10M escrow, 700 raw RSN, repayment 15M;
@@ -72,7 +77,7 @@ object Phase4WallD {
     // R9 stays the 6-element card-less form, so covenant verdicts use the
     // compiled haircut).
     val rsn700 = Seq(new ErgoToken(P3.RSN_ID, 700L))
-    val covR8  = Seq(lenderBytes, poolNftBytes)
+    val covR8  = Seq(lenderHash, poolNftBytes)
 
     // ---------------- D1 ----------------
     println("=== D1: coupon installment short 1 nanoERG ===")
@@ -100,22 +105,22 @@ object Phase4WallD {
 
     // ---------------- D3 ----------------
     println("=== D3: repay-shaped release gated on paymentsRemaining <= 1 ===")
-    // Rev-3 fabs: TestLib.repayPlan reads a bare R8 tree, but the rev-3 R8
-    // is a pack — build the ExitPlan by hand with exitTree = the lender
-    // P2PK tree used at R8(0).
+    // Rev-3/4 fabs: TestLib.repayPlan reads a bare R8 tree, but R8 is a
+    // pack and (rev 4) its element 0 is only a HASH — build the ExitPlan
+    // by hand with exitTree = the lender P2PK tree the fab hashed in.
     def repayShapedPlan(bond: InputBox): TestLib.ExitPlan =
       TestLib.ExitPlan(lenderTree, REPAY, Some(bond.getId.getBytes),
         Seq(new ErgoToken(bond.getTokens.get(0).getId, 1L)))
     // Two coupons already serviced: value/escrow down two bounties.
     val schedS2 = Array[Long](P4.INSTALLMENT, PERIOD, 2L, (h - 5).toLong, 0L, 5000000L)
-    val bondS2  = P4.fabBondV3(ctx, schedS2, Seq(lenderBytes), borrowerBytes,
+    val bondS2  = P4.fabBondV3(ctx, schedS2, Seq(lenderHash), borrowerHash,
       25000000L, REPAY, maturity)
     Kit.expectScriptFalse("D3 repay-shaped release at sched(2) == 2 (interior coupon still owed)") {
       bp.sign(TestLib.buildExit(ctx, bondS2, repayShapedPlan(bondS2), bp, Some(h)))
     }
     // All three interior coupons serviced: escrow exhausted, repay opens.
     val schedS1 = Array[Long](P4.INSTALLMENT, PERIOD, 1L, (h - 5).toLong, 0L, 0L)
-    val bondS1  = P4.fabBondV3(ctx, schedS1, Seq(lenderBytes), borrowerBytes,
+    val bondS1  = P4.fabBondV3(ctx, schedS1, Seq(lenderHash), borrowerHash,
       20000000L, REPAY, maturity)
     Kit.expectReduces("D3-twin same release at sched(2) == 1 reduces (the final bullet IS the repay exit)") {
       bp.reduce(TestLib.buildExit(ctx, bondS1, repayShapedPlan(bondS1), bp, Some(h)), 0).getCost
@@ -128,15 +133,15 @@ object Phase4WallD {
     // on-chain mempool race itself — one winner, loser invalidates clean —
     // lives in RunPhase4, not here.
     val schedLate = Array[Long](P4.INSTALLMENT, PERIOD, 4L, (h - 20).toLong, 0L, 15000000L)
-    val bondLate  = P4.fabBondV3(ctx, schedLate, Seq(lenderBytes), borrowerBytes,
+    val bondLate  = P4.fabBondV3(ctx, schedLate, Seq(lenderHash), borrowerHash,
       35000000L, REPAY, maturity)
     Kit.expectReduces("D4-twin late coupon past deadline+grace reduces (no grace ceiling on couponOk)") {
       kp.reduce(P4.buildCoupon(ctx, bondLate,
-        P4.honestCouponPlan(bondLate, healthyBranch = true), None, kAddr, Some(h)), 0).getCost
+        P4.honestCouponPlan(bondLate, lenderBytes, healthyBranch = true), None, kAddr, Some(h)), 0).getCost
     }
     Kit.expectReduces("D4-twin missed-accel at the SAME pre-header reduces (the race is live)") {
       kp.reduce(P4.buildMissedAccel(ctx, bondLate,
-        P4.honestMissedAccelPlan(bondLate), kAddr, Some(h)), 0).getCost
+        P4.honestMissedAccelPlan(bondLate, lenderBytes), kAddr, Some(h)), 0).getCost
     }
 
     // ---------------- D5 ----------------
@@ -151,29 +156,29 @@ object Phase4WallD {
     println("=== D6: covenant coupon verdict wall (live pool picks the branch, never the builder) ===")
     val schedCovH = Array[Long](P4.INSTALLMENT, PERIOD, 4L, (h - 5).toLong, 15000L, 10000000L)
     val schedCovU = Array[Long](P4.INSTALLMENT, PERIOD, 4L, (h - 5).toLong, 20000L, 10000000L)
-    val bondCovH  = P4.fabBondV3(ctx, schedCovH, covR8, borrowerBytes,
+    val bondCovH  = P4.fabBondV3(ctx, schedCovH, covR8, borrowerHash,
       15000000L, REPAY, maturity, tokens = rsn700)
-    val bondCovU  = P4.fabBondV3(ctx, schedCovU, covR8, borrowerBytes,
+    val bondCovU  = P4.fabBondV3(ctx, schedCovU, covR8, borrowerHash,
       15000000L, REPAY, maturity, tokens = rsn700)
     require(!P4.healthyV3(pool, bondCovU.getValue - schedCovU(5), 700L, REPAY, 20000L, HAIRCUT_KEEP),
       "D6 setup: threshold 20000 must price UNHEALTHY against live reserves")
     Kit.expectRejected("D6a builder forces ADVANCE pack while pool prices unhealthy") {
       kp.sign(P4.buildCoupon(ctx, bondCovU,
-        P4.honestCouponPlan(bondCovU, healthyBranch = true), Some(pool), kAddr, Some(h)))
+        P4.honestCouponPlan(bondCovU, lenderBytes, healthyBranch = true), Some(pool), kAddr, Some(h)))
     }
     Kit.expectReduces("D6a-twin unhealthy coupon with the CURE pack reduces (coupon taken, cure state entered)") {
       kp.reduce(P4.buildCoupon(ctx, bondCovU,
-        P4.honestCouponPlan(bondCovU, healthyBranch = false), Some(pool), kAddr, Some(h)), 0).getCost
+        P4.honestCouponPlan(bondCovU, lenderBytes, healthyBranch = false), Some(pool), kAddr, Some(h)), 0).getCost
     }
     require(P4.healthyV3(pool, bondCovH.getValue - schedCovH(5), 700L, REPAY, 15000L, HAIRCUT_KEEP),
       "D6 setup: threshold 15000 must price HEALTHY against live reserves")
     Kit.expectRejected("D6b builder forces CURE pack while pool prices healthy") {
       kp.sign(P4.buildCoupon(ctx, bondCovH,
-        P4.honestCouponPlan(bondCovH, healthyBranch = false), Some(pool), kAddr, Some(h)))
+        P4.honestCouponPlan(bondCovH, lenderBytes, healthyBranch = false), Some(pool), kAddr, Some(h)))
     }
     Kit.expectReduces("D6b-twin healthy coupon with the ADVANCE pack reduces") {
       kp.reduce(P4.buildCoupon(ctx, bondCovH,
-        P4.honestCouponPlan(bondCovH, healthyBranch = true), Some(pool), kAddr, Some(h)), 0).getCost
+        P4.honestCouponPlan(bondCovH, lenderBytes, healthyBranch = true), Some(pool), kAddr, Some(h)), 0).getCost
     }
 
     // ---------------- D7 ----------------
@@ -183,7 +188,7 @@ object Phase4WallD {
     // overdue is derived, never stored (decision 2); cure requires
     // sched(3) < 0, so a top-up-shaped "cure" can never clear the coupon.
     val schedOverdue = Array[Long](P4.INSTALLMENT, PERIOD, 4L, (h - 20).toLong, 20000L, 10000000L)
-    val bondOverdue  = P4.fabBondV3(ctx, schedOverdue, covR8, borrowerBytes,
+    val bondOverdue  = P4.fabBondV3(ctx, schedOverdue, covR8, borrowerHash,
       15000000L, REPAY, maturity, tokens = rsn700)
     val cureAdd = 5000000L
     require(!P4.healthyV3(pool, bondOverdue.getValue - schedOverdue(5), 700L, REPAY, 20000L, HAIRCUT_KEEP),
@@ -223,11 +228,11 @@ object Phase4WallD {
     // The at-boundary twin is DELIBERATE (>= semantics pinned at the edge).
     Kit.expectRejected("D8 missed-accel one block before deadline+grace") {
       kp.sign(P4.buildMissedAccel(ctx, bondOff,
-        P4.honestMissedAccelPlan(bondOff), kAddr, Some(h + 4)))
+        P4.honestMissedAccelPlan(bondOff, lenderBytes), kAddr, Some(h + 4)))
     }
     Kit.expectReduces("D8-twin missed-accel at exactly deadline+grace reduces") {
       kp.reduce(P4.buildMissedAccel(ctx, bondOff,
-        P4.honestMissedAccelPlan(bondOff), kAddr, Some(h + 5)), 0).getCost
+        P4.honestMissedAccelPlan(bondOff, lenderBytes), kAddr, Some(h + 5)), 0).getCost
     }
 
     // ---------------- D9 ----------------
@@ -297,14 +302,14 @@ object Phase4WallD {
       }
     d11Reject("D11 R4 mask (different 32-byte order id)",
       honestOff.copy(succR4Override = Some(ErgoValue.of(ErgoId.create("55" * 32).getBytes))))
-    d11Reject("D11 R5 mask (borrower bytes -> keeper tree bytes)",
-      honestOff.copy(succR5Override = Some(ErgoValue.of(keeperBytes))))
+    d11Reject("D11 R5 mask (borrower hash -> keeper tree hash)",
+      honestOff.copy(succR5Override = Some(ErgoValue.of(keeperHash))))
     d11Reject("D11 R6 mask (repayment + 1)",
       honestOff.copy(succR6Override = Some(ErgoValue.of(REPAY + 1L))))
     d11Reject("D11 R7 mask (maturity + 1)",
       honestOff.copy(succR7Override = Some(ErgoValue.of(maturity + 1))))
-    d11Reject("D11 R8 mask (keeper tree at pack element 0)",
-      honestOff.copy(succR8Override = Some(P4.packValue(Seq(keeperBytes)))))
+    d11Reject("D11 R8 mask (keeper tree hash at pack element 0)",
+      honestOff.copy(succR8Override = Some(P4.packValue(Seq(keeperHash)))))
     d11Reject("D11 script mask (successor at the ORDER contract)",
       honestOff.copy(succContractOverride = Some(Contracts.order(ctx)._2)))
     d11Reject("D11 token mask (loan token routed to the payer)",
@@ -319,7 +324,7 @@ object Phase4WallD {
     // value 15M -> 10M, escrow 10M -> 5M, payments 4 -> 3, ERG leg
     // unchanged at 5M, deadline h + 5 still ahead (cure window live).
     val schedInCure = Array[Long](P4.INSTALLMENT, PERIOD, 3L, -(h + 5).toLong, 20000L, 5000000L)
-    val bondInCure  = P4.fabBondV3(ctx, schedInCure, covR8, borrowerBytes,
+    val bondInCure  = P4.fabBondV3(ctx, schedInCure, covR8, borrowerHash,
       10000000L, REPAY, maturity, tokens = rsn700)
     require(!P4.healthyV3(pool, bondInCure.getValue - schedInCure(5), 700L, REPAY, 20000L, HAIRCUT_KEEP),
       "D12 setup: in-cure bond must price unhealthy (cure pack is the verdict-true branch)")
@@ -328,7 +333,7 @@ object Phase4WallD {
     // the coupon gate's sched(3) > 0 conjunct may reject it.
     Kit.expectRejected("D12a coupon while in cure (sched(3) < 0 closes the coupon path)") {
       kp.sign(P4.buildCoupon(ctx, bondInCure,
-        P4.honestCouponPlan(bondInCure, healthyBranch = false), Some(pool), kAddr, Some(h)))
+        P4.honestCouponPlan(bondInCure, lenderBytes, healthyBranch = false), Some(pool), kAddr, Some(h)))
     }
     Kit.expectScriptFalse("D12b plain top-up during cure still rejects (cure is the only collateral-add)") {
       bp.sign(P2.buildTopUp(ctx, bondInCure, Kit.MIN_BOX_VALUE, bp))
@@ -337,7 +342,7 @@ object Phase4WallD {
       "D12 setup: overdue covenant bond must price unhealthy (cure pack is the verdict branch)")
     Kit.expectReduces("D12c-twin late coupon past deadline pre-seizure reduces (couponOk has no grace ceiling)") {
       kp.reduce(P4.buildCoupon(ctx, bondOverdue,
-        P4.honestCouponPlan(bondOverdue, healthyBranch = false), Some(pool), kAddr, Some(h)), 0).getCost
+        P4.honestCouponPlan(bondOverdue, lenderBytes, healthyBranch = false), Some(pool), kAddr, Some(h)), 0).getCost
     }
 
     // ---------------- D13 ----------------
@@ -346,7 +351,7 @@ object Phase4WallD {
     // EXPLICITLY, not by inheritance. It calls NO verdict (decision 2), so
     // no health require here; the covenant-shaped fab (bondOverdue) rides
     // only so the RSN token-withhold shape exists.
-    val d13Honest = P4.honestMissedAccelPlan(bondOverdue)
+    val d13Honest = P4.honestMissedAccelPlan(bondOverdue, lenderBytes)
     Kit.expectRejected("D13a missed-accel exit short 1 nanoERG (A2 analog)") {
       kp.sign(P4.buildMissedAccel(ctx, bondOverdue,
         d13Honest.copy(exitValue = d13Honest.exitValue - 1L), kAddr, Some(h)))
@@ -375,9 +380,9 @@ object Phase4WallD {
     // be diverted from the lender script" invariant.
     val vaultBytes    = TestLib.vaultTree().bytes
     val vaultVarBytes = TestLib.vaultVariantTree().bytes
-    val bondVault   = P4.fabBondV3(ctx, schedOff, Seq(vaultBytes), borrowerBytes,
+    val bondVault   = P4.fabBondV3(ctx, schedOff, Seq(P4.h32(vaultBytes)), borrowerHash,
       35000000L, REPAY, maturity)
-    val honestVault = P4.honestCouponPlan(bondVault, healthyBranch = true)
+    val honestVault = P4.honestCouponPlan(bondVault, vaultBytes, healthyBranch = true)
     Kit.expectRejected("D14 installment paid to a script one byte off R8(0)") {
       kp.sign(P4.buildCoupon(ctx, bondVault,
         honestVault.copy(instTree = vaultVarBytes), None, kAddr, Some(h)))

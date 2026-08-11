@@ -11,6 +11,9 @@ object Phase3Tail {
     val bondB2 = args(0)  // B post-cure successor (nextCheck on grid)
     val bondC1 = args(1)  // C in-cure successor (deadline blown soon)
     val accelAt = args(2).toInt
+    // Rev 4: the acceleration exit destination comes from the harness's
+    // own vault tree — the bond only stores its blake2b256.
+    val vault = TestLib.vaultTree()
 
     println("--- T-P3-3: healthy checkpoint crank (B chk2, keeper) ---")
     val bondB3 = P3.doCovenantCrank(bondB2, expectHealthy = true,
@@ -18,10 +21,9 @@ object Phase3Tail {
 
     println("--- T-P3-4: acceleration (C, signatureless early default) ---")
     Kit.waitForHeight(accelAt)
-    val exitC = P3.doAccelerate(bondC1, "P3 accelerate (C, keeper)")
+    val exitC = P3.doAccelerate(bondC1, vault.bytes, "P3 accelerate (C, keeper)")
 
     println("--- T-P3-5: repay B (exit wall across covenant successors) ---")
-    val vault = TestLib.vaultTree()
     val exitB = TestLib.doExit(bondB3, vault, asRepay = true,
       "P3 repay of cured+cranked covenant bond (B)", TestLib.borrower)
 

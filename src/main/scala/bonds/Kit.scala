@@ -2,7 +2,7 @@ package bonds
 
 import org.ergoplatform.appkit._
 import org.ergoplatform.appkit.impl.ErgoTreeContract
-import sigmastate.Values.ErgoTree
+import sigma.ast.ErgoTree
 
 /** Shared harness plumbing: node client, size-bit fix, provers, node HTTP
   * helpers (public endpoints only), confirmation waits, and the
@@ -31,7 +31,7 @@ object Kit {
     */
   def sized(tree: ErgoTree): ErgoTree =
     if ((tree.header & 0x08).toByte != 0.toByte) tree
-    else new ErgoTree((tree.header | 0x08).toByte, tree.constants, tree.root)
+    else new ErgoTree(ErgoTree.HeaderType @@ (tree.header | 0x08).toByte, tree.constants, tree.root)
 
   def compile(ctx: BlockchainContext, source: String, constants: Constants): (ErgoTree, ErgoTreeContract) = {
     val raw = ctx.compileContract(constants, source).getErgoTree

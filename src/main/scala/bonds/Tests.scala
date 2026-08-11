@@ -23,7 +23,9 @@ object T1_FundFromOrder {
     val loanTokenId = """"tokenId"\s*:\s*"([0-9a-f]{64})"""".r.findFirstMatchIn(s).map(_.group(1))
       .getOrElse(sys.error("T1: no token on bond box"))
     require(s.contains("0e20" + loanTokenId), "T1: R4 does not reference the order box id")
-    require(s.contains(TestLib.hex(vault.bytes)), "T1: R8 does not hold the vault script bytes")
+    // Rev 4: R8(0) holds blake2b256 of the lender script, not the script.
+    require(s.contains(TestLib.hex(P4.h32(vault.bytes))),
+      "T1: R8(0) does not hold blake2b256 of the vault script")
     println(s"  bond anatomy verified on-chain (loan token $loanTokenId)")
 
     require(Provenance.isConforming(loanTokenId, TestLib.orderTree()),

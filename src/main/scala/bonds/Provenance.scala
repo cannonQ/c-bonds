@@ -1,7 +1,7 @@
 package bonds
 
 import org.ergoplatform.appkit._
-import sigmastate.Values.ErgoTree
+import sigma.ast.ErgoTree
 
 /** Registry-side conforming rule.
   *

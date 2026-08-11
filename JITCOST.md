@@ -5,6 +5,60 @@ as the node's 500,000 per-input budget). Cross-checked against the node's
 DEBUG script-cost log. Raw per-run measurements accumulate below the
 curated tables.
 
+## Rev-4 tree (script actors by hash, appkit 6.0.0 / sigma-state 6.0.2, 2026-08-11)
+
+> **6.0 IS A NEW COST SCALE. Do not compare any number in this table to
+> the rev-3 table below.** The same contract logic that measured
+> ~250-315K on the 5.0.4-bundled interpreter measures ~14-22K here. The
+> drop is the 6.0 cost model, not an optimisation we made. Re-baseline
+> from scratch after any toolchain move; never carry a budget conclusion
+> across one.
+
+110 measurements over 54 distinct paths, from the compile gate, both
+walls, the E10 hooked lifecycle, RunPhase4 and the Phase 1-3 re-runs.
+
+| path | JitCost | % of 500K budget |
+|---|---|---|
+| **match, loan-token mint (heaviest observed)** | **16,757 – 21,581** | **4.3%** |
+| match: carded / card-less / hook-pinned (E10) | 17,135 / 16,757 / 17,648 | ~3.5% |
+| coupon covenant HEALTHY / UNHEALTHY→cure | 17,600–17,612 / 17,613–17,624 | ~3.5% |
+| coupon covenant-off (gate / on-chain H2) | 16,886 / 16,887 | 3.4% |
+| coupon on-chain (H1 1/2/3) | 17,638 / 17,626 / 17,626 | 3.5% |
+| cure top-up (gate / on-chain H1) | 17,323–17,337 / 17,356 | 3.5% |
+| crank covenant HEALTHY / UNHEALTHY→cure | 14,823–14,834 / 14,835–14,846 | ~3.0% |
+| crank covenant-off (gate / on-chain) | 14,105 / 14,106 | 2.8% |
+| top-up | 16,600 – 17,054 | ~3.4% |
+| repay (bullet / installment final / token collateral) | 16,497 / 16,938 / 16,931 | ~3.4% |
+| covenant acceleration | 14,792 – 14,805 | 3.0% |
+| missed-payment acceleration (gate / on-chain H2) | 14,068 / 14,069 | 2.8% |
+| plain liquidation past maturity | 14,380 – 16,818 | ~3.0% |
+| **hooked liquidation (gate / ON-CHAIN E10)** | 14,426 / **14,438** | 2.9% |
+| order cancel (all four probe shapes) | 15,854 | 3.2% |
+| cancel BATCHED with a match | 19,648 | 3.9% |
+| card refuel (value-grow) | 16,312 | 3.3% |
+| attestation generic branch (fabricated, local) | 14,775 | 3.0% |
+
+**Headroom: the heaviest observed path uses 4.3% of the per-input
+budget** — about 23x margin. On the rev-3 scale the same wall of paths
+sat at ~63%. Nothing is remotely close to budget, so the hash-compare
+rewrite (six blake2b256 sites) and the reveal reads cost nothing worth
+tracking.
+
+### The eager-CSE evidence rows (permanent probes)
+
+| probe | JitCost |
+|---|---|
+| cancel, NO ctx vars | 15,854 |
+| cancel, WRONG-TYPED ctx var 0 (Long) | 15,854 |
+| cancel, honest var-0 shape attached | 15,854 |
+| cancel of `tmpl(1)==0` order (division-hoist, EKB F1) | 15,854 |
+| cancel of short-R9 order (index-hoist, EKB F1) | 15,854 |
+
+All five identical. Attaching a variable that would THROW if evaluated
+changes the cost by zero, which is the strongest available evidence that
+the rev-4 `getVar` reveal is never evaluated on the cancel arm — the
+LOW-P3-B1 eager-hoist class stays closed.
+
 ## Rev-3 tree (Phase 4: instalments + card layout, 2026-08-08)
 
 | path | JitCost | % of 500K budget |
@@ -255,3 +309,179 @@ extra `forall`/`exists` conservation pass.
 | B16 cleanup repay(token bond) | 314063 | 1847087 | 2026-08-08T23:55:48.294952Z |
 | match(order-spend + loan-token mint) | 252924 | 1847120 | 2026-08-09T00:54:39.401844Z |
 | C-wall cleanup repay (bond D) | 314063 | 1847121 | 2026-08-09T01:03:41.343264Z |
+| P4 gate: crank covenant HEALTHY (local reduce, live pool) | 14823 | 1848409 | 2026-08-10T19:39:04.210390Z |
+| P4 gate: crank covenant UNHEALTHY->cure (local reduce, live pool) | 14835 | 1848409 | 2026-08-10T19:39:04.458297Z |
+| P4 gate: coupon covenant HEALTHY (local reduce, live pool) | 17600 | 1848409 | 2026-08-10T19:39:04.923619Z |
+| P4 gate: coupon covenant UNHEALTHY->cure (local reduce, live pool) | 17613 | 1848409 | 2026-08-10T19:39:05.120258Z |
+| P4 gate: cure top-up (local reduce, live pool) | 17323 | 1848409 | 2026-08-10T19:39:05.325271Z |
+| P4 gate: acceleration (local reduce, live pool) | 14792 | 1848409 | 2026-08-10T19:39:05.563888Z |
+| P4 gate: repay with NO data input (eager-eval probe) | 19300 | 1848409 | 2026-08-10T19:39:06.537318Z |
+| P4 gate: covenantOff crank with NO data input (eager-eval probe) | 14105 | 1848409 | 2026-08-10T19:39:06.698308Z |
+| P4 gate: top-up with NO data input (eager-eval probe) | 17051 | 1848409 | 2026-08-10T19:39:06.863769Z |
+| P4 gate: covenantOff coupon with NO data input (eager-eval probe) | 16886 | 1848409 | 2026-08-10T19:39:07.052795Z |
+| P4 gate: nonzero-installment repay at sched(2)==1 (no data input) | 18899 | 1848409 | 2026-08-10T19:39:07.265363Z |
+| P4 gate: order cancel with NO data input (eager-eval probe) | 15844 | 1848409 | 2026-08-10T19:39:07.572241Z |
+| P4 gate: card-less match with NO data input (eager-eval probe) | 16751 | 1848409 | 2026-08-10T19:39:07.778316Z |
+| P4 gate: cancel of tmpl(1)==0 order (division-hoist probe, EKB F1) | 15844 | 1848409 | 2026-08-10T19:39:07.790104Z |
+| P4 gate: cancel of short-R9 order (index-hoist probe, EKB F1) | 15844 | 1848409 | 2026-08-10T19:39:07.801644Z |
+| P4 gate: carded match (1 data input, fabricated card) | 17079 | 1848409 | 2026-08-10T19:39:07.964829Z |
+| P4 gate: borrowerAuth eager-safety (signatureless crank, zero borrower inputs) | 14823 | 1848409 | 2026-08-10T19:39:08.112759Z |
+| P4 gate: missed-payment acceleration (local reduce, no data input) | 14068 | 1848409 | 2026-08-10T19:39:08.258869Z |
+| P4 gate: hooked liquidation (ctx-ext var preimage, local reduce) | 14426 | 1848409 | 2026-08-10T19:39:08.416007Z |
+| P4 gate: plain liquidation past maturity (local reduce) | 14405 | 1848409 | 2026-08-10T19:39:08.561854Z |
+| P4 gate: card refuel value-grow (local reduce) | 16312 | 1848409 | 2026-08-10T19:39:08.582269Z |
+| P4 gate: attestation generic branch (fabricated nonzero-type bond, local) | 14775 | 1848409 | 2026-08-10T19:39:08.745610Z |
+| P4 gate: crank covenant HEALTHY (local reduce, live pool) | 14823 | 1848435 | 2026-08-10T20:41:29.890070Z |
+| P4 gate: crank covenant UNHEALTHY->cure (local reduce, live pool) | 14835 | 1848435 | 2026-08-10T20:41:30.117221Z |
+| P4 gate: coupon covenant HEALTHY (local reduce, live pool) | 17600 | 1848435 | 2026-08-10T20:41:30.337862Z |
+| P4 gate: coupon covenant UNHEALTHY->cure (local reduce, live pool) | 17613 | 1848435 | 2026-08-10T20:41:30.538400Z |
+| P4 gate: cure top-up (local reduce, live pool) | 17323 | 1848435 | 2026-08-10T20:41:30.724033Z |
+| P4 gate: acceleration (local reduce, live pool) | 14792 | 1848435 | 2026-08-10T20:41:30.887932Z |
+| P4 gate: repay with NO data input (eager-eval probe) | 19300 | 1848435 | 2026-08-10T20:41:31.549239Z |
+| P4 gate: covenantOff crank with NO data input (eager-eval probe) | 14105 | 1848435 | 2026-08-10T20:41:31.706009Z |
+| P4 gate: top-up with NO data input (eager-eval probe) | 17051 | 1848435 | 2026-08-10T20:41:31.869745Z |
+| P4 gate: covenantOff coupon with NO data input (eager-eval probe) | 16886 | 1848435 | 2026-08-10T20:41:32.039071Z |
+| P4 gate: nonzero-installment repay at sched(2)==1 (no data input) | 18899 | 1848435 | 2026-08-10T20:41:32.194284Z |
+| P4 gate: order cancel with NO data input (eager-eval probe) | 15852 | 1848435 | 2026-08-10T20:41:32.492532Z |
+| P4 gate: card-less match with NO data input (eager-eval probe) | 16751 | 1848435 | 2026-08-10T20:41:32.654515Z |
+| P4 gate: cancel of tmpl(1)==0 order (division-hoist probe, EKB F1) | 15852 | 1848435 | 2026-08-10T20:41:32.667290Z |
+| P4 gate: cancel of short-R9 order (index-hoist probe, EKB F1) | 15852 | 1848435 | 2026-08-10T20:41:32.679084Z |
+| P4 gate: carded match (1 data input, fabricated card) | 17118 | 1848435 | 2026-08-10T20:41:32.839808Z |
+| P4 gate: borrowerAuth eager-safety (signatureless crank, zero borrower inputs) | 14823 | 1848435 | 2026-08-10T20:41:32.989934Z |
+| P4 gate: missed-payment acceleration (local reduce, no data input) | 14068 | 1848435 | 2026-08-10T20:41:33.134535Z |
+| P4 gate: hooked liquidation (ctx-ext var preimage, local reduce) | 14426 | 1848435 | 2026-08-10T20:41:33.292715Z |
+| P4 gate: plain liquidation past maturity (local reduce) | 14405 | 1848435 | 2026-08-10T20:41:33.436001Z |
+| P4 gate: card refuel value-grow (local reduce) | 16312 | 1848435 | 2026-08-10T20:41:33.455719Z |
+| P4 gate: attestation generic branch (fabricated nonzero-type bond, local) | 14775 | 1848435 | 2026-08-10T20:41:33.622517Z |
+| P4 gate: crank covenant HEALTHY (local reduce, live pool) | 14823 | 1848438 | 2026-08-10T20:49:21.073903Z |
+| P4 gate: crank covenant UNHEALTHY->cure (local reduce, live pool) | 14835 | 1848438 | 2026-08-10T20:49:21.283870Z |
+| P4 gate: coupon covenant HEALTHY (local reduce, live pool) | 17600 | 1848438 | 2026-08-10T20:49:21.509224Z |
+| P4 gate: coupon covenant UNHEALTHY->cure (local reduce, live pool) | 17613 | 1848438 | 2026-08-10T20:49:21.697378Z |
+| P4 gate: cure top-up (local reduce, live pool) | 17323 | 1848438 | 2026-08-10T20:49:21.878922Z |
+| P4 gate: acceleration (local reduce, live pool) | 14792 | 1848438 | 2026-08-10T20:49:22.037856Z |
+| P4 gate: repay with NO data input (eager-eval probe) | 19300 | 1848438 | 2026-08-10T20:49:22.695768Z |
+| P4 gate: covenantOff crank with NO data input (eager-eval probe) | 14105 | 1848438 | 2026-08-10T20:49:22.853093Z |
+| P4 gate: top-up with NO data input (eager-eval probe) | 17051 | 1848438 | 2026-08-10T20:49:23.017388Z |
+| P4 gate: covenantOff coupon with NO data input (eager-eval probe) | 16886 | 1848438 | 2026-08-10T20:49:23.189420Z |
+| P4 gate: nonzero-installment repay at sched(2)==1 (no data input) | 18899 | 1848438 | 2026-08-10T20:49:23.358172Z |
+| P4 gate: order cancel with NO data input (eager-eval probe) | 15852 | 1848438 | 2026-08-10T20:49:23.698479Z |
+| P4 gate: card-less match with NO data input (eager-eval probe) | 16751 | 1848438 | 2026-08-10T20:49:23.863690Z |
+| P4 gate: cancel of tmpl(1)==0 order (division-hoist probe, EKB F1) | 15852 | 1848438 | 2026-08-10T20:49:23.876439Z |
+| P4 gate: cancel of short-R9 order (index-hoist probe, EKB F1) | 15852 | 1848438 | 2026-08-10T20:49:23.889038Z |
+| P4 gate: carded match (1 data input, fabricated card) | 17127 | 1848438 | 2026-08-10T20:49:24.064474Z |
+| P4 gate: borrowerAuth eager-safety (signatureless crank, zero borrower inputs) | 14823 | 1848438 | 2026-08-10T20:49:24.219080Z |
+| P4 gate: missed-payment acceleration (local reduce, no data input) | 14068 | 1848438 | 2026-08-10T20:49:24.373863Z |
+| P4 gate: hooked liquidation (ctx-ext var preimage, local reduce) | 14426 | 1848438 | 2026-08-10T20:49:24.540187Z |
+| P4 gate: plain liquidation past maturity (local reduce) | 14405 | 1848438 | 2026-08-10T20:49:24.685144Z |
+| P4 gate: card refuel value-grow (local reduce) | 16312 | 1848438 | 2026-08-10T20:49:24.705146Z |
+| P4 gate: attestation generic branch (fabricated nonzero-type bond, local) | 14775 | 1848438 | 2026-08-10T20:49:24.872094Z |
+| P4 gate: crank covenant HEALTHY (local reduce, live pool) | 14823 | 1848548 | 2026-08-11T01:06:19.289829Z |
+| P4 gate: crank covenant UNHEALTHY->cure (local reduce, live pool) | 14835 | 1848548 | 2026-08-11T01:06:19.517565Z |
+| P4 gate: coupon covenant HEALTHY (local reduce, live pool) | 17600 | 1848548 | 2026-08-11T01:06:19.724309Z |
+| P4 gate: coupon covenant UNHEALTHY->cure (local reduce, live pool) | 17613 | 1848548 | 2026-08-11T01:06:19.919002Z |
+| P4 gate: cure top-up (local reduce, live pool) | 17323 | 1848548 | 2026-08-11T01:06:20.096929Z |
+| P4 gate: acceleration (local reduce, live pool) | 14792 | 1848548 | 2026-08-11T01:06:20.254778Z |
+| P4 gate: repay with NO data input (eager-eval probe) | 19300 | 1848548 | 2026-08-11T01:06:20.916237Z |
+| P4 gate: covenantOff crank with NO data input (eager-eval probe) | 14105 | 1848548 | 2026-08-11T01:06:21.074254Z |
+| P4 gate: top-up with NO data input (eager-eval probe) | 17051 | 1848548 | 2026-08-11T01:06:21.236381Z |
+| P4 gate: covenantOff coupon with NO data input (eager-eval probe) | 16886 | 1848548 | 2026-08-11T01:06:21.402119Z |
+| P4 gate: nonzero-installment repay at sched(2)==1 (no data input) | 18899 | 1848548 | 2026-08-11T01:06:21.561431Z |
+| P4 gate: order cancel with NO data input (eager-eval probe) | 15854 | 1848548 | 2026-08-11T01:06:21.869103Z |
+| P4 gate: card-less match with NO data input (eager-eval probe) | 16757 | 1848548 | 2026-08-11T01:06:22.038650Z |
+| P4 gate: cancel of tmpl(1)==0 order (division-hoist probe, EKB F1) | 15854 | 1848548 | 2026-08-11T01:06:22.054398Z |
+| P4 gate: cancel of short-R9 order (index-hoist probe, EKB F1) | 15854 | 1848548 | 2026-08-11T01:06:22.067002Z |
+| P4 gate: carded match (1 data input, fabricated card) | 17135 | 1848548 | 2026-08-11T01:06:22.233436Z |
+| P4 gate: borrowerAuth eager-safety (signatureless crank, zero borrower inputs) | 14823 | 1848548 | 2026-08-11T01:06:22.389424Z |
+| P4 gate: missed-payment acceleration (local reduce, no data input) | 14068 | 1848548 | 2026-08-11T01:06:22.541345Z |
+| P4 gate: hooked liquidation (ctx-ext var preimage, local reduce) | 14426 | 1848548 | 2026-08-11T01:06:22.707167Z |
+| P4 gate: plain liquidation past maturity (local reduce) | 14405 | 1848548 | 2026-08-11T01:06:22.855079Z |
+| P4 gate: card refuel value-grow (local reduce) | 16312 | 1848548 | 2026-08-11T01:06:22.875509Z |
+| P4 gate: attestation generic branch (fabricated nonzero-type bond, local) | 14775 | 1848548 | 2026-08-11T01:06:23.109751Z |
+| P4 gate: crank covenant HEALTHY (local reduce, live pool) | 14834 | 1848569 | 2026-08-11T01:43:22.393807Z |
+| P4 gate: crank covenant UNHEALTHY->cure (local reduce, live pool) | 14846 | 1848569 | 2026-08-11T01:43:22.626686Z |
+| P4 gate: coupon covenant HEALTHY (local reduce, live pool) | 17612 | 1848569 | 2026-08-11T01:43:22.889848Z |
+| P4 gate: coupon covenant UNHEALTHY->cure (local reduce, live pool) | 17624 | 1848569 | 2026-08-11T01:43:23.095565Z |
+| P4 gate: cure top-up (local reduce, live pool) | 17337 | 1848569 | 2026-08-11T01:43:23.301724Z |
+| P4 gate: acceleration (local reduce, live pool) | 14805 | 1848569 | 2026-08-11T01:43:23.484400Z |
+| P4 gate: repay with NO data input (eager-eval probe) | 19352 | 1848569 | 2026-08-11T01:43:24.218893Z |
+| P4 gate: covenantOff crank with NO data input (eager-eval probe) | 14106 | 1848569 | 2026-08-11T01:43:24.394040Z |
+| P4 gate: top-up with NO data input (eager-eval probe) | 17054 | 1848569 | 2026-08-11T01:43:24.585398Z |
+| P4 gate: covenantOff coupon with NO data input (eager-eval probe) | 16887 | 1848569 | 2026-08-11T01:43:24.768703Z |
+| P4 gate: nonzero-installment repay at sched(2)==1 (no data input) | 18905 | 1848569 | 2026-08-11T01:43:24.942232Z |
+| P4 gate: order cancel with NO data input (eager-eval probe) | 15854 | 1848569 | 2026-08-11T01:43:25.263146Z |
+| P4 gate: card-less match with NO data input (eager-eval probe) | 16757 | 1848569 | 2026-08-11T01:43:25.441242Z |
+| P4 gate: cancel of tmpl(1)==0 order (division-hoist probe, EKB F1) | 15854 | 1848569 | 2026-08-11T01:43:25.455396Z |
+| P4 gate: cancel of short-R9 order (index-hoist probe, EKB F1) | 15854 | 1848569 | 2026-08-11T01:43:25.467683Z |
+| P4 gate: carded match (1 data input, fabricated card) | 17135 | 1848569 | 2026-08-11T01:43:25.644514Z |
+| P4 gate: borrowerAuth eager-safety (signatureless crank, zero borrower inputs) | 14834 | 1848569 | 2026-08-11T01:43:25.809682Z |
+| P4 gate: missed-payment acceleration (local reduce, no data input) | 14069 | 1848569 | 2026-08-11T01:43:25.968702Z |
+| P4 gate: hooked liquidation (ctx-ext var preimage, local reduce) | 14427 | 1848569 | 2026-08-11T01:43:26.145952Z |
+| P4 gate: plain liquidation past maturity (local reduce) | 14406 | 1848569 | 2026-08-11T01:43:26.304274Z |
+| P4 gate: card refuel value-grow (local reduce) | 16312 | 1848569 | 2026-08-11T01:43:26.325324Z |
+| P4 gate: attestation generic branch (fabricated nonzero-type bond, local) | 14776 | 1848569 | 2026-08-11T01:43:26.616749Z |
+| P4 gate: crank covenant HEALTHY (local reduce, live pool) | 14834 | 1848577 | 2026-08-11T02:05:15.519658Z |
+| P4 gate: crank covenant UNHEALTHY->cure (local reduce, live pool) | 14846 | 1848577 | 2026-08-11T02:05:15.750834Z |
+| P4 gate: coupon covenant HEALTHY (local reduce, live pool) | 17612 | 1848577 | 2026-08-11T02:05:15.976086Z |
+| P4 gate: coupon covenant UNHEALTHY->cure (local reduce, live pool) | 17624 | 1848577 | 2026-08-11T02:05:16.185409Z |
+| P4 gate: cure top-up (local reduce, live pool) | 17337 | 1848577 | 2026-08-11T02:05:16.383278Z |
+| P4 gate: acceleration (local reduce, live pool) | 14805 | 1848577 | 2026-08-11T02:05:16.559478Z |
+| P4 gate: repay with NO data input (eager-eval probe) | 16940 | 1848577 | 2026-08-11T02:05:17.295344Z |
+| P4 gate: covenantOff crank with NO data input (eager-eval probe) | 14106 | 1848577 | 2026-08-11T02:05:17.465772Z |
+| P4 gate: top-up with NO data input (eager-eval probe) | 17054 | 1848577 | 2026-08-11T02:05:17.645147Z |
+| P4 gate: covenantOff coupon with NO data input (eager-eval probe) | 16887 | 1848577 | 2026-08-11T02:05:17.820011Z |
+| P4 gate: nonzero-installment repay at sched(2)==1 (no data input) | 16493 | 1848577 | 2026-08-11T02:05:17.991636Z |
+| P4 gate: order cancel with NO data input (eager-eval probe) | 15854 | 1848577 | 2026-08-11T02:05:18.318262Z |
+| P4 gate: card-less match with NO data input (eager-eval probe) | 16757 | 1848577 | 2026-08-11T02:05:18.494217Z |
+| P4 gate: cancel of tmpl(1)==0 order (division-hoist probe, EKB F1) | 15854 | 1848577 | 2026-08-11T02:05:18.509448Z |
+| P4 gate: cancel of short-R9 order (index-hoist probe, EKB F1) | 15854 | 1848577 | 2026-08-11T02:05:18.524451Z |
+| P4 gate: carded match (1 data input, fabricated card) | 17135 | 1848577 | 2026-08-11T02:05:18.708651Z |
+| P4 gate: cancel with WRONG-TYPED ctx var 0 (Long, not Coll[Byte]) — must still cancel | 15854 | 1848577 | 2026-08-11T02:05:18.723903Z |
+| P4 gate: cancel with the honest var-0 SHAPE attached (control) | 15854 | 1848577 | 2026-08-11T02:05:18.738331Z |
+| P4 gate: cancel BATCHED with a match (order past bondScriptOk, stops at INPUTS(0).id) | 19648 | 1848577 | 2026-08-11T02:05:18.928302Z |
+| P4 gate: borrowerAuth eager-safety (signatureless crank, zero borrower inputs) | 14834 | 1848577 | 2026-08-11T02:05:19.091373Z |
+| P4 gate: missed-payment acceleration (local reduce, no data input) | 14069 | 1848577 | 2026-08-11T02:05:19.252419Z |
+| P4 gate: hooked liquidation (ctx-ext var preimage, local reduce) | 14427 | 1848577 | 2026-08-11T02:05:19.435029Z |
+| P4 gate: plain liquidation past maturity (local reduce) | 14406 | 1848577 | 2026-08-11T02:05:19.594661Z |
+| P4 gate: card refuel value-grow (local reduce) | 16312 | 1848577 | 2026-08-11T02:05:19.615365Z |
+| P4 gate: attestation generic branch (fabricated nonzero-type bond, local) | 14776 | 1848577 | 2026-08-11T02:05:19.794302Z |
+| E10 match (carded, hook-pinned, var-0 + var-1 reveals) | 17648 | 1848682 | 2026-08-11T05:34:28.627273Z |
+| E10 hooked liquidation (destination rebind, bond var 0) | 14438 | 1848696 | 2026-08-11T05:58:14.914894Z |
+| H1 match-order-v3(carded, 1 data input) | 17629 | 1848704 | 2026-08-11T06:11:42.831749Z |
+| H2 match-order-v3(card-less) | 16770 | 1848712 | 2026-08-11T06:27:58.539917Z |
+| H1 coupon 1 (unhealthy->cure) | 17638 | 1848714 | 2026-08-11T06:31:43.624773Z |
+| H1 cure (health restored, grid resumed) | 17356 | 1848716 | 2026-08-11T06:34:28.708138Z |
+| H2 coupon 1 | 16887 | 1848722 | 2026-08-11T06:41:28.794029Z |
+| H1 coupon 2 | 17626 | 1848724 | 2026-08-11T06:43:13.859520Z |
+| H1 coupon 3 (third-party keeper, D15) | 17626 | 1848730 | 2026-08-11T06:53:58.980501Z |
+| H1 final repay (installment bond, sched(2)==1) | 16938 | 1848731 | 2026-08-11T07:00:14.102376Z |
+| H2 missed-accel (grace expiry) | 14069 | 1848740 | 2026-08-11T07:16:59.216222Z |
+| D4 match-order-v3 | 16770 | 1848747 | 2026-08-11T07:29:59.871842Z |
+| match(order-spend + loan-token mint) | 16757 | 1848768 | 2026-08-11T07:49:33.778533Z |
+| repay(borrower-signed) | 16497 | 1848769 | 2026-08-11T07:51:19.449298Z |
+| match(order-spend + loan-token mint) | 16757 | 1848773 | 2026-08-11T07:58:05.086900Z |
+| liquidate(signatureless) | 16380 | 1848783 | 2026-08-11T08:13:20.198026Z |
+| match(order-spend + loan-token mint) | 16757 | 1848790 | 2026-08-11T08:26:20.842899Z |
+| A1-twin repay | 16497 | 1848793 | 2026-08-11T08:31:35.955319Z |
+| match(order-spend + loan-token mint) | 16757 | 1848796 | 2026-08-11T08:36:21.507539Z |
+| A2-twin repay | 16497 | 1848798 | 2026-08-11T08:40:06.605869Z |
+| match(order-spend + loan-token mint) | 16757 | 1848803 | 2026-08-11T08:44:52.172724Z |
+| A3-cleanup liquidate | 16380 | 1848813 | 2026-08-11T08:57:37.282786Z |
+| match(order-spend + loan-token mint) | 16757 | 1848818 | 2026-08-11T09:03:07.813467Z |
+| A4-twin liquidate | 16380 | 1848828 | 2026-08-11T09:20:52.935217Z |
+| match(order-spend + loan-token mint) | 17190 | 1848835 | 2026-08-11T09:34:38.573923Z |
+| A5-twin liquidate(token collateral) | 16818 | 1848845 | 2026-08-11T09:57:23.719342Z |
+| match(order-spend + loan-token mint) | 16757 | 1848852 | 2026-08-11T10:08:09.772606Z |
+| A7-twin liquidate | 16380 | 1848862 | 2026-08-11T10:23:54.897821Z |
+| match(order-spend + loan-token mint) | 16757 | 1848874 | 2026-08-11T10:46:35.078761Z |
+| B-wall cleanup repay | 16497 | 1848876 | 2026-08-11T10:48:50.563096Z |
+| match(order-spend + loan-token mint) | 16757 | 1848890 | 2026-08-11T11:16:38.381645Z |
+| crank(keeper, signatureless) | 14106 | 1848898 | 2026-08-11T11:44:53.675396Z |
+| self-crank(borrower) | 14106 | 1848904 | 2026-08-11T11:53:08.896590Z |
+| top-up(borrower-signed) | 16600 | 1848905 | 2026-08-11T11:56:08.959489Z |
+| T5-cleanup repay(cranked+topped bond) | 16497 | 1848907 | 2026-08-11T11:57:39.022444Z |
+| match(order-spend + loan-token mint) | 21581 | 1848912 | 2026-08-11T12:03:54.572750Z |
+| B13 cleanup repay | 16497 | 1848922 | 2026-08-11T12:22:40.251687Z |
+| match(order-spend + loan-token mint) | 19602 | 1848927 | 2026-08-11T12:28:25.853738Z |
+| B16 cleanup repay(token bond) | 16931 | 1848930 | 2026-08-11T12:30:56.129095Z |
+| match(order-spend + loan-token mint) | 17238 | 1848969 | 2026-08-11T14:00:32.495753Z |
+| C-wall cleanup repay (bond D) | 16931 | 1848970 | 2026-08-11T14:01:49.483697Z |

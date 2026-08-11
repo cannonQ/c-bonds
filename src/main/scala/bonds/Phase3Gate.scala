@@ -66,17 +66,19 @@ object Phase3Gate {
       "probe setup: threshold 20000 must price unhealthy against live reserves")
 
     def mkBond(sched: Array[Long]): InputBox = {
-      // Rev 3: R5 borrower script bytes; R8 pack sized by the covenant shape.
+      // Rev 3: R8 pack sized by the covenant shape. Rev 4: R5 / R8(0) hold
+      // blake2b256 of the borrower / lender trees; exits still pay the
+      // full lAddr script (the probes below build it from lAddr directly).
       val r8Pack =
-        if (sched(4) != 0L) Seq(lenderTreeBytes, ErgoId.create(POOL_NFT).getBytes)
-        else Seq(lenderTreeBytes)
+        if (sched(4) != 0L) Seq(P4.h32(lenderTreeBytes), ErgoId.create(POOL_NFT).getBytes)
+        else Seq(P4.h32(lenderTreeBytes))
       ctx.newTxBuilder().outBoxBuilder()
         .value(bondValue)
         .contract(bondContract)
         .tokens(new ErgoToken(fakeId, 1L), new ErgoToken(rsnId, amtRSN))
         .registers(
           ErgoValue.of(fakeId.getBytes),
-          ErgoValue.of(bAddr.toErgoContract.getErgoTree.bytes),
+          ErgoValue.of(P4.h32(bAddr.toErgoContract.getErgoTree.bytes)),
           ErgoValue.of(repayment),
           ErgoValue.of(maturity),
           P4.packValue(r8Pack),

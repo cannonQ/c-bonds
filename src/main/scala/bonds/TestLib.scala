@@ -3,7 +3,7 @@ package bonds
 import org.ergoplatform.appkit._
 import org.ergoplatform.sdk.{ErgoId, ErgoToken}
 import org.ergoplatform.appkit.impl.ErgoTreeContract
-import sigmastate.Values.ErgoTree
+import sigma.ast.ErgoTree
 import scala.collection.JavaConverters._
 
 /** Shared flows for the Phase 1 suite. Dust sizes only. Steps that span
@@ -157,10 +157,13 @@ object TestLib {
         tmpl(4), tmpl(5))
 
       // Bond R8 pack sized by the covenant shape (rev 3): covenant bonds
-      // carry the resolved poolNFT at index 1, covenant-off just the lender.
+      // carry the resolved poolNFT at index 1, covenant-off just the
+      // lender. Rev 4: element 0 is blake2b256 of the lender tree, and
+      // the preimage is revealed on the order input as ctx-ext var 0.
+      val lenderHash = P4.h32(lenderScriptTree.bytes)
       val r8Pack =
-        if (tmpl(4) != 0L) Seq(lenderScriptTree.bytes, ErgoId.create(Contracts.POOL_NFT).getBytes)
-        else Seq(lenderScriptTree.bytes)
+        if (tmpl(4) != 0L) Seq(lenderHash, ErgoId.create(Contracts.POOL_NFT).getBytes)
+        else Seq(lenderHash)
 
       val bondOut = tb.outBoxBuilder()
         .value(orderBox.getValue)
@@ -168,17 +171,20 @@ object TestLib {
         .tokens((loanToken +: collToks): _*)
         .registers(
           ErgoValue.of(orderBox.getId.getBytes),        // R4 order box id
-          orderBox.getRegisters.get(0),                 // R5 borrower (direct register copy)
+          // R5: rev 4 hashes the order's borrower bytes (no longer a copy)
+          ErgoValue.of(P4.h32(P4.borrowerBytesOf(orderBox, 0))),
           ErgoValue.of(repayment),                      // R6 repayment
           ErgoValue.of(maturity),                       // R7 maturity height
-          P4.packValue(r8Pack),                         // R8 suffix pack [lender, poolNFT?]
+          P4.packValue(r8Pack),                         // R8 pack [lenderHash, poolNFT?]
           ErgoValue.of(bondSched)                       // R9 pack
         ).build()
 
       val principalOut = tb.outBoxBuilder().value(principal).contract(bAddr.toErgoContract).build()
 
-      // Order box MUST be INPUTS(0): both the contract and the token-mint rule key on it.
-      val unsigned = tb.boxesToSpend((Seq(orderBox) ++ funds).asJava)
+      // Order box MUST be INPUTS(0): both the contract and the token-mint
+      // rule key on it. It carries the rev-4 reveal vars.
+      val orderIn = P4.orderWithMatchVars(orderBox, lenderScriptTree.bytes)
+      val unsigned = tb.boxesToSpend((Seq(orderIn) ++ funds).asJava)
         .outputs(bondOut, principalOut)
         .fee(Kit.TX_FEE).sendChangeTo(lAddr).build()
 

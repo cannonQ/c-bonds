@@ -281,3 +281,96 @@ covenant shapes 202,794–205,372; ~41% of the 500K budget).
 |---|---|---|
 | ConformingBond | 1111 | 0x18 (size bit set) |
 | ConformingOrder | 765 | 0x18 (size bit set) |
+
+---
+
+# EKB Two-Pass Audit — revision 4 contracts (2026-08-10, pre-deployment)
+
+Revision 4 stores the script actors (borrower, lender, liquidation hook)
+as blake2b256 hashes and reveals their preimages in the match
+transaction. Both contracts were re-audited two-pass, independently, on
+the changed tree; the findings below are the adjudicated set. Every
+accepted finding was implemented before any rev-4 dust moved, and each
+carries at least one adversarial wall test.
+
+## ConformingOrder.es (revision 4)
+
+Fixed in-contract, same day:
+
+- **MED: card numerics were loosenable.** `liqCarveout` and
+  `haircutKeep` arrived from the card unbounded — an inflated carveout
+  lets a liquidator strip collateral, an inflated haircut nullifies the
+  covenant. Both are now capped at the compiled outer bounds: a card may
+  TIGHTEN a protocol bound, never loosen it. (Wall: card-bounds group.)
+- **MED: card authenticated by NFT id alone.** A publisher could mint
+  the pinned NFT into a mutable look-alike box and reprice orders that
+  were posted but not yet matched. The card must now also hash to the
+  compiled `TERMS_BOX_HASH`, so card immutability is structural rather
+  than conventional. (Wall: look-alike card.)
+- **LOW:** reserved `flagWord` gated to zero (no reserved bit ships
+  matchable before its semantics exist); card byte fields must be 32
+  bytes or the empty sentinel; threshold-max sentinel made sign-safe;
+  the cancel co-spend now excludes SELF, so an order whose borrower
+  field is the order tree itself cannot self-authorize its own cancel.
+
+Adjudicated and implemented after review:
+
+- **HIGH: a revealed hook preimage is not a USABLE hook.** The
+  reveal-at-match rule proves a hook script exists on-chain; it cannot
+  prove the script is spendable. Past maturity the hook is the lender's
+  only claim, so a borrower could still pin a hook that burns. Fixed by
+  **card-blessed hooks**: a pinned hook must appear in the pinned card's
+  blessed-hook list, and card-less orders may not carry hooks at all.
+  Hook and terms now travel as one immutable, publisher-vetted bundle.
+  (Walls: blessed/unblessed hook, card-less hook ban, plus the
+  end-to-end hooked-bond lifecycle on mainnet.)
+
+Pinned, not fixed (posture, documented):
+
+- The lender-side analog — a funder who reveals bytes that hash
+  correctly but are not a spendable script — remains possible and
+  remains the funder's own loss, unchanged from revisions 2 and 3. One
+  wall test confirms the match succeeds, by design.
+- The reveal read is the revision's only fallible node. It sits inside
+  the match chain behind lazy guards; two permanent gate probes hold the
+  line, including one that attaches a WRONG-TYPED context variable
+  (a type mismatch throws where an absent variable returns None) and
+  confirms an order still cancels cleanly.
+
+## ConformingBond.es (revision 4)
+
+- **MED: the price source was authenticated by NFT alone.** The covenant
+  verdict accepted any three-token box carrying the pinned NFT — a
+  self-minted NFT on a fabricated box could price a loan healthy at
+  will. The verdict now also requires the data input to run the pinned
+  DEX pool's script. (Wall: fabricated price source, built to price
+  healthy by a wide margin so only the pin can reject it.)
+- **MED: repay did not pin the collateral's destination.** A loose
+  contract borrower could have its collateral routed to a stranger as a
+  side effect of a transaction that "repays" its bond. Repay now
+  requires every collateral token to land in an output whose script
+  hashes to the borrower field; the ERG residual stays free. (Wall:
+  repay collateral pin.)
+- **Closed by the order-side fixes:** the unclamped-carveout theft path
+  and the covenant-nullifying haircut both close at origination.
+- Hash-compare correctness was the focus of the second pass: all six
+  sites verified, no type or length confusion, and every hash is taken
+  over a total expression on INPUTS/OUTPUTS proposition bytes — no new
+  fallible node enters the bond, so the revision-2 eager-evaluation
+  discipline is unchanged.
+
+Logged, no change (economics or inherent):
+
+- AMM spot-price manipulation remains the ecosystem-standard posture,
+  buffered by the haircut and by two-sample acceleration; it escalates
+  on thin pools and is tracked as an economics item.
+- The party paying a coupon picks the sampling moment; this is inherent
+  to a signatureless coupon and only bites in combination with the item
+  above.
+- Servicing an unhealthy position late writes an already-expired cure
+  window — an emergent consequence of two intended rules
+  (grid-anchored deadlines, no grace ceiling), pinned here as intended:
+  it is a race the borrower chose to enter.
+- Builders must not submit a coupon or crank within a few blocks of
+  maturity: such a transaction can be mempool-evicted rather than merely
+  fail. Harness rule, not a contract change.
