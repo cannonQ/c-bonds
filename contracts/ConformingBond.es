@@ -1,140 +1,130 @@
 {
   // =====================================================================
-  // Conforming Bond — rev 4 (script actors by HASH; see rev-4 note at the
-  // register reads: R5 and R8(0) hold blake2b256 hashes, all lender
-  // payments verified by hashing the output's propositionBytes, borrower
-  // co-spend verified by hashing input propositionBytes. Layout otherwise
-  // rev 3:)
+  // Conforming Bond
   //
-  // Phase 1 core (repay/liquidate), Phase 2 successor machinery
-  // (crank/top-up) and Phase 3 covenant machinery (verdict crank, cure,
-  // acceleration) keep their shapes. Rev 3 adds, in ONE revision (the
-  // bond is never revised again):
-  //   - script borrower: R5 is borrower ErgoTree BYTES; borrower arms
-  //     authorize by CO-SPEND (an input guarded by those bytes), so
-  //     contracts and DAOs can post bonds. The whole contract is a
-  //     single sigmaProp of booleans.
-  //   - card layout: R8 is a Coll[Coll[Byte]] suffix pack, R9 an
-  //     extended Long pack carrying card numerics; compiled constants
-  //     remain as the suffix-absent fallback defaults (the compiled
-  //     constant IS the type-0 default card).
-  //   - instalments (Phase 4): the coupon IS the crank — a signatureless
-  //     coupon path advances the schedule only by paying the installment
-  //     to the lender script in the same tx; a missed coupon is DERIVED
-  //     state (no register write) opening a signatureless acceleration
-  //     with no health test; repay becomes the final payment behind
-  //     sched(2) <= 1.
-  //   - liquidation hook stub: R8(2) commits a blake2b256 hash; the
-  //     liquidate arm's destination rebinds to the committed script,
-  //     supplied at spend via context-extension var 0 (zero data-input
-  //     surface).
-  //   - attestation stub: verdict dispatch on a type that no conforming
-  //     bond can carry yet (order enforces type 0). Enabling a real
-  //     attester later is an order-side revision only.
+  // A live loan: collateral (value + tokens) locked under the terms in
+  // R4-R9 until repaid, liquidated, or accelerated. Two kinds of arm:
+  //   - signatureless: liquidate, crank, coupon, accelerate, missedAccel.
+  //     Anyone may execute; the conditions fully determine the outcome.
+  //   - borrower-authorized: repay, top-up, cure. Authorization is by
+  //     CO-SPEND: some input's propositionBytes must hash to R5.
+  //     Spending that input satisfies its own script, and that is the
+  //     transaction's authorization — a P2PK borrower signs, a contract
+  //     or DAO borrower authorizes through its own spending logic.
+  // Every branch is Boolean; the contract is one sigmaProp at top level.
   //
-  // Registers (layout locked, REV3-LAYOUT.md; suffix packs opt-in by
-  // size, dense, append-only):
+  // Registers. Suffix packs are dense and append-only: presence is
+  // detected by size, and a longer pack always extends a shorter one.
   //   R4: Coll[Byte]       originating order box id (== loan token id)
-  //   R5: Coll[Byte]       blake2b256(borrower ErgoTree) — rev 4
+  //   R5: Coll[Byte]       blake2b256 of the borrower's ErgoTree
   //   R6: Long             repayment amount, nanoERG
   //   R7: Int              maturity height
-  //   R8: Coll[Coll[Byte]] [lenderHash]                      plain
-  //                        [lenderHash, poolNFT]             covenant
-  //                        [lenderHash, poolNFT, liqHookHash]
-  //                        (lenderHash = blake2b256 of lender ErgoTree,
-  //                        rev 4; preimage revealed at match, order var 0)
-  //                                            covenant + custom hook
-  //                        (index 3, attesterScriptHash, exists only on
-  //                        fabricated nonzero-type bonds — see below)
-  //   R9: Coll[Long]  size 6  [installment, periodBlocks,
-  //         paymentsRemaining, nextCheckHeight, thresholdBps,
-  //         escrowBalance] — card-less shape, compiled defaults apply
-  //                   size 10 [... + crankBounty, graceBlocks,
-  //         liqCarveout, haircutKeep] — carded shape, values resolved
-  //         at match; whole-pack successor equality freezes the suffix
-  //                   size 11 [... + attestationType] — fabricated
-  //         nonzero-type bonds only; the order's type-0 gate makes this
-  //         shape unmatchable in rev 3 (audit note: the generic verdict
-  //         branch below is intentionally unreachable by any conforming
-  //         bond until an order-side revision enables it)
-  //       nextCheckHeight > 0: normal; < 0: IN CURE, |value| = deadline.
-  //       paymentsRemaining counts ALL payments = K interior coupons +
-  //       1 final bullet (K+1 at origination); bullets carry 0.
-  //   tokens(0): (loanTokenId, 1), minted at match, id == R4 value
-  //   tokens(1): collateral token — covenant bonds only
+  //   R8: Coll[Coll[Byte]] size 1 [lenderHash]                  plain
+  //                        size 2 [.., poolNFT]                 covenant
+  //                        size 3 [.., .., liqHookHash]         + hook
+  //                        size 4 [.., .., .., attesterHash]    dead: no
+  //                               currently originated bond carries it
+  //                               (see verdictAt)
+  //     lenderHash  = blake2b256 of the lender's ErgoTree
+  //     liqHookHash = blake2b256 of a liquidation script
+  //   R9: Coll[Long] size 6  [installment, periodBlocks,
+  //                           paymentsRemaining, nextCheckHeight,
+  //                           thresholdBps, escrowBalance]
+  //                  size 10 [.. + crankBounty, graceBlocks,
+  //                           liqCarveout, haircutKeep]
+  //                  size 11 [.. + attestationType] — dead, as R8 size 4
+  //     Absent suffix elements fall back to the compiled constants of
+  //     the same names. nextCheckHeight > 0: next checkpoint height;
+  //     < 0: the bond is in cure and |nextCheckHeight| is the cure
+  //     deadline. paymentsRemaining counts every payment, K interior
+  //     coupons + 1 final payment (K+1 at origination); bullet loans
+  //     carry 0. thresholdBps == 0 disables the covenant entirely.
+  //   tokens(0): (loanTokenId, 1) — minted at match; id == R4 value
+  //   tokens(1): the collateral token — covenant bonds only
   //
-  // Paths (disjointness: crank/coupon split by sched(0); the two
-  // accelerations split by sign of sched(3); coupon vs missed-accel
-  // overlap past the deadline BY DESIGN — late-coupon race, first
-  // confirmation wins; liquidate owns HEIGHT >= maturity; borrower arms
-  // race everything borrower-side as always):
-  //   Repay        borrower co-spend, any height, sched(2) <= 1: for an
-  //                installment bond the final payment IS the repay exit,
-  //                reachable only after every interior coupon. Bullets
-  //                (sched(2) == 0) pass unchanged.
-  //   Liquidate    signatureless, HEIGHT >= maturity. When the hook is
-  //                committed (R8 size 3) the exit destination rebinds to
-  //                the hook script, supplied via ctx-ext var 0 and
-  //                verified against the hash; otherwise the R8(0) lender
-  //                script, unchanged from rev 2.
-  //   Crank        signatureless, INSTALLMENT-FREE bonds only
-  //                (sched(0) == 0). As Phase 3, verdict-branched for
-  //                covenant bonds. The verdict argument keeps the
-  //                -sched(0) term: behind the sched(0) == 0 gate it is
-  //                provably zero — the gate now enforces what Phase 3
-  //                only argued — and it keeps this call site
-  //                structurally distinct (decision 5).
-  //   Coupon       signatureless, installment bonds at a checkpoint:
-  //                successor advances the grid (or enters cure encoding
-  //                on an unhealthy covenant verdict — coupon accepted,
-  //                health owed) and pays OUTPUTS(1) >= sched(0) to the
-  //                lender script with the R4 = SELF.id receipt (no loan
-  //                token — it stays on the successor). Consumes the
-  //                grid point's bounty (K-bound holds: one bounty per
-  //                grid point, ever). No grace ceiling: a late coupon
-  //                races missed-payment acceleration by design.
-  //   Cure         borrower co-spend, sched(3) < 0, no deadline (limbo
-  //                rule). Unchanged from Phase 3; structurally cannot
-  //                clear an overdue coupon (cure needs sched(3) < 0, a
-  //                missed coupon keeps sched(3) > 0).
-  //   Accelerate   signatureless covenant default: blown grace, still
-  //                unhealthy NOW. Verdict argument is exact (trap
-  //                removed, decision 5).
-  //   MissedAccel  signatureless payment default: installment bond,
-  //                sched(3) > 0, sched(2) > 1, HEIGHT >= checkpoint +
-  //                grace, before maturity. Liquidation shape, NO health
-  //                test (payment default != collateral default), no
-  //                verdict call (no fifth site). "Overdue" is derived
-  //                from SELF + HEIGHT — no stored flag (MED-1).
-  //   Top-up       borrower co-spend, outside cure only. Unchanged.
+  // R5 and R8(0) hold script HASHES, not script bytes, so bond box size
+  // is independent of counterparty script size (boxes cap at 4 KB).
+  // Payment destinations are verified by hashing the OUTPUT's own
+  // propositionBytes. The matching order contract requires both
+  // preimages in its context extension at match (its var 0 = lender
+  // script, var 1 = hook script), so the full scripts are always
+  // recoverable from chain history. NOTE the var-index overload: var 0
+  // on the ORDER input at match is the lender script; var 0 on THIS
+  // input at liquidation is the hook script.
   //
-  // borrowerAuth = an input guarded by the borrower bytes exists in the
-  // tx. It reads only INPUTS (always present, never fallible), so eager
-  // CSE hoisting is safe — pinned by a permanent gate probe, not by
-  // this argument. A trivially-satisfiable borrower script opens the
-  // borrower arms to anyone: the borrower's own choice, same class as
-  // the funder self-selecting R8(0) == the bond tree (documented, not
-  // prevented).
+  // Paths:
+  //   Repay        borrower co-spend, any height, sched(2) <= 1. An
+  //                installment bond reaches this only after every
+  //                interior coupon — early repayment of the remaining
+  //                schedule is deliberately impossible. Bullets
+  //                (sched(2) == 0) repay at any time. Collateral tokens
+  //                must return to the borrower (collateralToBorrower).
+  //   Liquidate    signatureless, HEIGHT >= maturity. With a committed
+  //                hook (R8 size >= 3) the exit box's script must BE the
+  //                hook script, revealed in context-extension var 0 of
+  //                this input and verified against R8(2). Without a
+  //                hook, the exit pays the lender.
+  //   Crank        signatureless checkpoint advance for bonds with no
+  //                installment (sched(0) == 0); verdict-branched when
+  //                the covenant is on.
+  //   Coupon       signatureless checkpoint advance for installment
+  //                bonds, valid only when OUTPUTS(1) pays the
+  //                installment to the lender in the same transaction.
+  //                No upper height bound: past the grace deadline a
+  //                late coupon and missedAccel are BOTH valid and the
+  //                first confirmation wins.
+  //   Cure         borrower co-spend while in cure (sched(3) < 0);
+  //                verdict must be healthy. No deadline: past the cure
+  //                window this stays valid and races accelerate.
+  //   Accelerate   signatureless covenant default: cure deadline passed
+  //                and the verdict is unhealthy NOW.
+  //   MissedAccel  signatureless payment default: an installment bond
+  //                whose checkpoint passed graceBlocks ago unpaid.
+  //                Liquidation shape; no health test (a payment default
+  //                is not a collateral default).
+  //   Top-up       borrower co-spend, outside cure only: value and
+  //                token amounts may only grow, terms frozen.
   //
-  // Height rule: windows >= open / < close, never equality. Type rule:
-  // every branch Boolean; ONE sigmaProp at top level. Fallible reads on
-  // foreign boxes are guarded so rejection reduces cleanly. Malformed
-  // SELF fabrications (R8 size 0, missing registers) brick eagerly —
-  // forger's loss, never a victim (established posture).
+  // Path disjointness:
+  //   - crank vs coupon: sched(0) == 0 vs sched(0) > 0
+  //   - accelerate vs missedAccel: sched(3) < 0 vs sched(3) > 0
+  //   - liquidate requires HEIGHT >= maturity; crank, coupon,
+  //     accelerate and missedAccel all require HEIGHT < maturity
+  //   - coupon vs missedAccel overlap past the grace deadline BY
+  //     DESIGN (the late-coupon race); all other signatureless pairs
+  //     are exclusive
+  //   - borrower arms may race signatureless arms; every such race is
+  //     between valid outcomes and the first confirmation wins
   //
-  // TOOLCHAIN RULE (rev-1 mainnet crash, LOW-P3-B1): every read that
-  // touches CONTEXT.dataInputs lives inside the SINGLE verdictAt lambda;
-  // each application site below uses a structurally distinct argument so
-  // no shared eager node can resurrect the crash. The attestation
-  // dispatch lives INSIDE the same lambda. Permanent gate probes cover
-  // every data-input-less shape plus borrowerAuth eager safety.
+  // Rules that hold everywhere:
+  //   - height windows are >= open and < close, never equality
+  //   - fallible reads on foreign boxes (outputs, data inputs) are
+  //     guarded, so a non-conforming transaction reduces cleanly to
+  //     false instead of throwing
+  //   - a malformed SELF (wrong register type, missing register, short
+  //     R8) is unspendable on every path; only the box's creator can
+  //     produce such a box, so the loss is theirs alone
+  //
+  // COMPILER CONSTRAINT — do not refactor away. The ErgoScript compiler
+  // hoists common subexpressions into eager top-level values, ABOVE the
+  // lazy &&/branch guards they sit under in source. An expression that
+  // can throw — CONTEXT.dataInputs(0) in a transaction with no data
+  // inputs — must therefore never appear as a subexpression shared
+  // between arms. Discipline in this file:
+  //   - every CONTEXT.dataInputs read lives inside the single verdictAt
+  //     lambda, including its attestation branch;
+  //   - the four application sites (crank, coupon, cure, accelerate)
+  //     each pass a structurally distinct argument, so no two sites can
+  //     merge into one shared eager node. The crank's argument keeps a
+  //     - sched(0) term for exactly this reason: behind the crank's
+  //     sched(0) == 0 gate it is provably zero, and it keeps that call
+  //     site distinct;
+  //   - borrowerAuth and the hash comparisons read only INPUTS/OUTPUTS
+  //     fields that always exist — total expressions, safe to hoist.
+  // Compile-gate probes assert every data-input-less path still
+  // reduces cleanly.
   // =====================================================================
 
-  // Rev 4 (external review, REV4-DECISIONS D1/D2): R8(0) and R5 hold
-  // blake2b256 HASHES of the lender/borrower ErgoTrees, not the bytes —
-  // bond box size is independent of counterparty script size (4KB box
-  // cap). Preimages are revealed at match (order-side ctx vars), so
-  // every destination is constructible from chain history.
   val r8pack     = SELF.R8[Coll[Coll[Byte]]].get
   val lenderHash = r8pack(0)
   val repayment    = SELF.R6[Long].get
@@ -145,15 +135,17 @@
 
   val exitBox = OUTPUTS(0)
 
-  // Extended-pack reads: size-guarded, compiled default when the suffix
-  // is absent (card-less bonds). Total on every R9 size — fabricated
-  // intermediate sizes read safely and brick only where shapes diverge.
+  // Suffix reads: size-conditioned with compiled-constant fallback.
+  // TOTAL expressions on every R9 size — safe under eager hoisting (see
+  // COMPILER CONSTRAINT). A pack of unexpected intermediate size reads
+  // safely and fails only where path conditions diverge.
   val crankBounty = if (sched.size > 6)  sched(6)  else CRANK_BOUNTY
   val graceBlocks = if (sched.size > 7)  sched(7)  else GRACE_BLOCKS
   val liqCarveout = if (sched.size > 8)  sched(8)  else LIQ_CARVEOUT
   val haircutKeep = if (sched.size > 9)  sched(9)  else HAIRCUT_KEEP
-  // Attestation stub slot: explicitly size-guarded (>= 11); 0 for every
-  // conforming rev-3 bond (the order enforces it).
+  // Attestation type: size-guarded, 0 whenever the slot is absent. The
+  // matching order originates only type-0 bonds, so the generic
+  // attester branch of verdictAt is currently unreachable.
   val attestType  = if (sched.size >= 11) sched(10) else 0L
 
   val toLender = blake2b256(exitBox.propositionBytes) == lenderHash
@@ -165,18 +157,16 @@
       t._1 == loanTokenId && t._2 == 1L
     }
 
-  // Repay: the final payment. sched(2) <= 1 makes the maturity-side
-  // bullet (R6) the collateral release for installment bonds (decision
-  // 4); bullets (sched(2) == 0) pass unchanged. No prepayment for
-  // installment bonds: the gate is reachable only by servicing every
-  // interior coupon (spec negative D3).
-  // Rev-4 (B-M3, approved): every collateral token must land in an output
-  // guarded by the borrower script — a loose DAO-borrower script co-spent
-  // in a foreign tx can no longer have its collateral routed elsewhere as
-  // a side effect of "repaying" it. ERG residual stays free (the borrower
-  // script authorized the tx; directing ERG is its own duty). tokens(0)
-  // is the loan token (rides to the lender receipt); slice(1,_) is the
-  // collateral. Empty slice (ERG-only bonds) is vacuously true.
+  // Collateral return on repay: every collateral token must land in an
+  // output guarded by the borrower's own script. Without this, any
+  // transaction the borrower's script happens to co-authorize could
+  // route the collateral anywhere as a side effect of "repaying" the
+  // loan. The ERG residual is deliberately unconstrained: the borrower
+  // script authorized this transaction, so directing ERG is its
+  // responsibility. tokens(0) is the loan token (it rides to the lender
+  // receipt); slice(1, _) is the collateral. Per-token check is >=, and
+  // different tokens may land in different outputs. The empty slice of
+  // an ERG-only bond is vacuously true.
   val collateralToBorrower =
     SELF.tokens.slice(1, SELF.tokens.size).forall { (t: (Coll[Byte], Long)) =>
       OUTPUTS.exists { (o: Box) =>
@@ -200,11 +190,11 @@
     }
   }
 
-  // Liquidation hook (rev 3, REV3-LAYOUT.md L7): with a committed hash
-  // the destination rebinds to the hook script — full bytes supplied by
-  // the spender via context-extension var 0 (NOT a data input: zero CSE
-  // surface), verified against the hash. Hook absent: standard
-  // liquidation to the lender script, unchanged.
+  // Liquidation destination: with a committed hook (R8 size >= 3) the
+  // exit box's script must equal the revealed preimage of R8(2). The
+  // preimage arrives in context-extension var 0 of THIS input — a
+  // context variable, not a data input, so the liquidate path keeps its
+  // zero-data-input property. Hook absent: the exit pays the lender.
   val liqDestOk =
     if (r8pack.size >= 3) {
       val hv = getVar[Coll[Byte]](0)
@@ -234,10 +224,10 @@
   // card values across the bond's whole life.
   val schedSuffix = sched.slice(6, sched.size)
 
-  // Frozen wall shared by all successor paths. R5 and R8 are plain
-  // byte-collection equalities in rev 3 (retires the SigmaProp-equality
-  // workaround); the R8 whole-collection equality freezes pool NFT and
-  // hook hash across successors automatically.
+  // Successor invariant shared by crank, coupon, top-up and cure: the
+  // script and R4-R8 are byte-equal — the R8 whole-collection equality
+  // freezes lender hash, pool NFT and hook hash together. R9 need only
+  // be PRESENT here; each path constrains its exact value.
   val succFrozen =
     exitBox.propositionBytes == SELF.propositionBytes &&
     exitBox.R4[Coll[Byte]].isDefined &&
@@ -254,29 +244,30 @@
 
   // ------------------- covenant pricing -------------------
 
-  // Verdict for the state (ergLeg, box whose tokens(1) is the priced
-  // collateral): -1 = data input missing/invalid; 0 = valid but
-  // UNHEALTHY (or attestation fail); 1 = HEALTHY (or attestation pass).
-  // Type 0 (every conforming rev-3 bond): the pinned Spectrum pool,
-  // authenticated by the R8(1) NFT (behind its size guard), fee read
-  // live from pool R4, division-free BigInt inequality with the
-  // card-resolved haircut. Type != 0 (fabricated only in rev 3, gate
-  // probe E7): one generic check — dataInputs(0) is a box whose script
-  // hashes to the pinned R8(3) attester hash, bound to this loan (R4 ==
-  // loan token id) and this checkpoint (R5 == |nextCheck|), reading
-  // pass (R6 == 1). Pool OR attester — never both — so every path stays
-  // at one data input. Fail-closed on absence, exactly like the pool
-  // read (the absence-fails-healthy variant is a reserved card flag
-  // bit; semantics decided when the first real attester ships).
+  // Health verdict for a proposed state (ergLeg, box whose tokens(1) is
+  // the priced collateral). Returns -1 = data input missing or invalid;
+  // 0 = valid but unhealthy (or attestation fail); 1 = healthy (or
+  // attestation pass).
+  // attestationType == 0: price against a Spectrum N2T pool.
+  // dataInputs(0) must RUN the real pool script (hash check — an NFT on
+  // a fake three-token box is not a price source) AND carry the R8(1)
+  // pool NFT. The swap fee is read live from pool R4 because it differs
+  // per pool. The test simulates selling the whole collateral leg into
+  // the pool, discounts the proceeds by haircutKeep, and compares
+  // against repayment * thresholdBps — rearranged into a division-free
+  // BigInt inequality.
+  // attestationType != 0: dataInputs(0) must be a box whose script
+  // hashes to R8(3), bound to this loan (R4 == loan token id) and this
+  // checkpoint (R5 == |nextCheck|), reporting pass/fail in R6. No
+  // currently originated bond carries a nonzero type, so this branch is
+  // unreachable until the order contract permits other types.
+  // Pool OR attester, never both: every path uses at most one data
+  // input. Absence fails closed (-1) on both branches.
   val verdictAt = { (q: (Long, Box)) =>
     if (CONTEXT.dataInputs.size > 0) {
       if (attestType == 0L) {
         if (r8pack.size >= 2) {
           val pool = CONTEXT.dataInputs(0)
-          // Rev-4 (B-M1b, approved): the price source must RUN the real
-          // Spectrum N2T pool script, not merely carry a pool-shaped NFT —
-          // a self-minted NFT on a fake 3-token box can no longer feed the
-          // verdict.
           if (pool.tokens.size == 3 &&
               blake2b256(pool.propositionBytes) == SPECTRUM_POOL_HASH &&
               pool.tokens(0)._1 == r8pack(1) &&
@@ -309,10 +300,10 @@
     } else -1
   }
 
-  // Crank: Phase 3 shape plus the sched(0) == 0 gate — the keeper crank
-  // path is CLOSED for installment bonds; the coupon is the only way to
-  // advance their schedule. Bounty and grace are the card-resolved
-  // values; the suffix rides the rebuilt pack.
+  // Crank: closed for installment bonds (sched(0) == 0) — the coupon is
+  // their only schedule advance. Bounty and grace are the resolved
+  // values from the suffix; the suffix itself rides the rebuilt pack
+  // unchanged.
   val crankOk =
     sched(0) == 0L &&
     nextCheck > 0L &&
@@ -340,19 +331,22 @@
       }
     }
 
-  // Coupon (decision 1): signatureless; at a checkpoint of an
-  // installment bond the schedule advances ONLY with the installment
-  // paid to the lender script in the same tx. OUTPUTS(0) successor:
-  // frozen wall, value and escrow down one bounty in lockstep, tokens
-  // verbatim, paymentsRemaining decremented, grid advanced (healthy /
-  // covenant-off) or cure-encoded (unhealthy — coupon accepted, only
-  // health then owed; cure restores the exact grid point with sched(2)
-  // already decremented). OUTPUTS(1) installment: lender script,
-  // >= sched(0), receipt R4 == SELF.id, NO loan token. The verdict
-  // prices the SUCCESSOR state (post-tx, per the outline); its
-  // +crankBounty term is the structural distinctifier vs the cure site.
-  // No grace ceiling: past the deadline this races missedAccelOk,
-  // first confirmation wins (D4).
+  // Coupon: the schedule advances ONLY when OUTPUTS(1) pays the
+  // installment to the lender in the same transaction. OUTPUTS(0) is
+  // the successor: terms frozen, value and escrow down exactly one
+  // bounty in lockstep, tokens verbatim (which keeps the loan token on
+  // the successor), paymentsRemaining decremented, checkpoint advanced
+  // (healthy or covenant-off) or cure-encoded (unhealthy: the coupon is
+  // accepted, only health is then owed — a later cure restores the
+  // grid point with sched(2) already decremented). OUTPUTS(1) pays
+  // >= sched(0) to the lender and carries the R4 == SELF.id receipt.
+  // The verdict prices the SUCCESSOR (post-transaction) state; its
+  // escrow term also keeps this verdictAt call site structurally
+  // distinct from the cure site (see COMPILER CONSTRAINT). No upper
+  // height bound: past the grace deadline this races missedAccelOk and
+  // the first confirmation wins. Each serviced checkpoint consumes
+  // exactly one bounty; the order escrows bounty * K at origination, so
+  // escrow reaches zero exactly when the last interior coupon is paid.
   val couponOk =
     sched(0) > 0L &&
     sched(2) > 1L &&
@@ -389,8 +383,9 @@
       }
     }
 
-  // Top-up: unchanged from Phase 3 (outside cure only); whole-pack
-  // equality carries the suffix verbatim.
+  // Token-growth helpers shared by top-up and cure: same token ids and
+  // count, amounts may only grow; strictlyMore additionally requires an
+  // actual increase somewhere.
   val tokensGrown =
     exitBox.tokens.size == SELF.tokens.size &&
     SELF.tokens.zip(exitBox.tokens).forall { (p: ((Coll[Byte], Long), (Coll[Byte], Long))) =>
@@ -403,6 +398,7 @@
       p._2._2 > p._1._2
     }
 
+  // Top-up: outside cure only (nextCheck > 0); schedule byte-equal.
   val topUpOk =
     nextCheck > 0L &&
     succFrozen &&
@@ -411,11 +407,13 @@
     strictlyMore &&
     exitBox.R9[Coll[Long]].get == sched
 
-  // Cure: unchanged from Phase 3 (borrower co-spend, in-cure only, no
-  // deadline — the limbo rule); grace is the card-resolved value, the
-  // suffix rides the restored pack. Structurally cannot clear an
-  // overdue coupon: cure requires sched(3) < 0, a missed coupon keeps
-  // sched(3) > 0 (D7).
+  // Cure: borrower co-spend while in cure (nextCheck < 0); the verdict
+  // must be healthy at the restored state. No deadline: past the cure
+  // window this stays valid and simply races accelerateOk. The restored
+  // checkpoint is grid-anchored — |nextCheck| - graceBlocks is the
+  // checkpoint that failed, + periodBlocks is the next grid point. A
+  // missed COUPON cannot be cured here: a missed coupon keeps
+  // sched(3) > 0 and cure requires sched(3) < 0.
   val cureOk =
     nextCheck < 0L &&
     succFrozen &&
@@ -427,10 +425,10 @@
       (0L - nextCheck) - graceBlocks + periodBlocks,
       sched(4), sched(5)).append(schedSuffix)
 
-  // Covenant acceleration: blown grace, still unhealthy NOW. The
-  // verdict argument is the semantically exact clean form — the old
-  // -sched(0) distinctifier moved to the crank, whose sched(0) == 0
-  // gate makes it provably neutral there (decision 5).
+  // Covenant acceleration: the cure deadline has passed and the bond is
+  // unhealthy NOW. The verdict argument is the exact pre-state; the
+  // call-site-distinctness burden is carried by the crank's -sched(0)
+  // term (see COMPILER CONSTRAINT).
   val accelerateOk =
     nextCheck < 0L &&
     HEIGHT.toLong >= (0L - nextCheck) &&
@@ -441,13 +439,13 @@
     allTokensDelivered &&
     verdictAt((SELF.value - escrow, SELF)) == 0
 
-  // Missed-payment acceleration (decision 2): a payment default, not a
-  // collateral default — NO health test, NO verdict call, no stored
-  // flag: "overdue" derives entirely from SELF + HEIGHT (MED-1). The
-  // liquidation shape to the plain lender script (the hook stays a
-  // liquidate-arm feature in rev 3); residual escrow rides to the
-  // lender. Deadline semantics mirror the cure deadline; the encoding
-  // is distinct (derived vs sign flag).
+  // Missed-payment acceleration: a payment default, not a collateral
+  // default — no health test, no verdictAt call (holding the verdict
+  // call-site count at four), and no stored flag: "overdue" derives
+  // entirely from SELF and HEIGHT, so there is nothing for an attacker
+  // to forge. Liquidation shape paying the PLAIN lender — the hook
+  // applies only to the liquidate arm. Residual escrow rides to the
+  // lender.
   val missedAccelOk =
     sched(0) > 0L &&
     sched(2) > 1L &&
@@ -459,11 +457,15 @@
     receiptOk &&
     allTokensDelivered
 
-  // Borrower authorization by co-spend: an input guarded by the
-  // borrower bytes exists in this tx. Spending that input requires
-  // satisfying its script (a P2PK borrower signs; a contract borrower
-  // satisfies its own logic) — the tx-level validity is the signature.
-  // Reads only INPUTS: eager-hoist safe, pinned by a gate probe.
+  // Borrower authorization by co-spend: some input's script must hash
+  // to R5. Spending that input satisfies its script, and that is the
+  // transaction's authorization (a P2PK borrower signs; a contract
+  // borrower's own spending conditions apply). Reads only INPUTS, which
+  // always exists — a total expression, safe under eager hoisting.
+  // A trivially-satisfiable borrower script opens the borrower arms to
+  // anyone: the borrower's own choice, documented rather than
+  // prevented, like a funder self-selecting a lender hash they cannot
+  // spend.
   val borrowerAuth = INPUTS.exists { (b: Box) => blake2b256(b.propositionBytes) == borrower }
 
   sigmaProp(

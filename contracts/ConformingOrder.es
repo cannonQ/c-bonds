@@ -1,80 +1,77 @@
 {
   // =====================================================================
-  // Conforming Open Order — rev 4 (script actors by hash + reveal-at-match)
-  //
-  // Rev 4 deltas (REV4-DECISIONS D1-D3 + audit fixes): bond R5 gets
-  // blake2b256(borrower R4 bytes); bond R8(0) must be a 32-byte lender
-  // hash; the match REQUIRES ctx-ext vars on THIS order input — var 0 =
-  // full lender script (always), var 1 = full hook script (iff pinned) —
-  // each verified against its hash. Card numerics: flagWord gated 0,
-  // carveout/haircutKeep capped at compiled outer bounds, byte fields
-  // 32-or-empty. Cancel co-spend excludes SELF.
+  // Conforming Open Order
   //
   // Borrower-side loan request. The borrower locks collateral here with
-  // the requested terms; any funder (key or contract) matches it by
+  // the requested terms; any funder — key or contract — matches it by
   // creating a conforming bond box and paying the principal to the
-  // borrower script. Semantics descend from SigmaFi's order/bond pair.
+  // borrower script. The only other path is cancel, authorized by
+  // borrower co-spend.
   //
-  // Rev 3 deltas (CONTRACT-DELTAS §2, REV3-LAYOUT.md):
-  //   - R4 is borrower ErgoTree BYTES (script borrower — contracts and
-  //     DAOs can post orders); principal pays to those bytes directly;
-  //     cancel authorizes by CO-SPEND of a borrower-script input.
-  //   - R8 is the pin pack [cardPin, liqHookHash?]: the terms-box NFT id
-  //     the borrower pinned at creation (pin-before-match — the funder
-  //     can never choose the tier), plus the optional liquidation-hook
-  //     hash (borrower-pinned pre-match for the same reason, L12).
-  //     EMPTY pin = card-less match: ZERO data inputs, wholesale
-  //     compiled defaults — the T0 baseline, structurally preserved.
-  //     With a pin, dataInputs(0) must be the card, validated by NFT id
-  //     == the pin. All checks are ours: data-input scripts do not
-  //     execute (same discipline as the bond's pool read).
-  //   - schedOk generalizes: bond registers == values resolved from
-  //     (card fields, sentinel fallback to compiled defaults,
-  //     order-supplied values where the card bounds them). The compiled
-  //     constants stay as protocol floors/outer bounds a card may
-  //     tighten, never loosen.
-  //   - Phase 4 (decision 6): MIN_COUPON floor on nonzero installments;
-  //     bullet coupling (installment iff payments); paymentsRemaining ==
-  //     K+1 exactly, with K >= 1 for installment orders (an installment
-  //     order with zero interior coupons is a bullet wearing a costume).
-  //     Escrow formula unchanged in shape, priced at the RESOLVED bounty.
-  //   - Attestation gate: a pinned card must carry attestationType == 0
-  //     — no nonzero-type bond is matchable in rev 3. Enabling a type
-  //     later is an order-side revision only; the bond never changes.
+  // Context-extension contract (variables on THIS input, supplied by
+  // the funder at match):
+  //   var 0: the full lender ErgoTree — required on every match;
+  //          blake2b256 of it must equal bond R8(0)
+  //   var 1: the full liquidation-hook script — required iff a hook
+  //          hash is pinned; blake2b256 of it must equal that hash
+  // The bond stores only 32-byte hashes, so the reveals keep both
+  // scripts recoverable from chain history. Without them, a hash with
+  // no known preimage would leave the borrower unable to construct any
+  // lender payment, or the lender without a post-maturity claim. A
+  // reveal proves the preimage exists — not that it is a spendable
+  // script; a funder revealing garbage burns only their own claim.
+  // NOTE the var-index overload: var 0 on this ORDER input is the
+  // lender script; var 0 on the BOND input at liquidation is the hook
+  // script. Builders must not share a constant across the two.
   //
   // Registers:
-  //   R4: Coll[Byte]       borrower ErgoTree bytes
+  //   R4: Coll[Byte]       borrower ErgoTree bytes — the full script,
+  //                        because the funder builds the principal box
+  //                        from it; the bond gets only blake2b256(R4)
   //   R5: Long             principal requested, nanoERG
   //   R6: Long             repayment amount, nanoERG
   //   R7: Int              term in blocks (maturity = match height + term)
   //   R8: Coll[Coll[Byte]] [cardPin] or [cardPin, liqHookHash];
-  //                        pin empty = card-less. MANDATORY register
-  //                        (write the empty coll for card-less): the
-  //                        element reads are total size-conditioned
-  //                        expressions, but the .get itself is eager —
-  //                        an absent or wrong-TYPE R8 bricks all paths
-  //                        like any malformed SELF register (tooling's
-  //                        duty, creator's loss — EKB rev-3 F3).
+  //                        empty pin = card-less. MANDATORY — write the
+  //                        empty coll for card-less. Element reads are
+  //                        total size-conditioned expressions, but the
+  //                        .get itself is eager: a box with an absent
+  //                        or wrong-typed R8 is unspendable on every
+  //                        path including cancel, and only its own
+  //                        creator can produce such a box.
   //   R9: Coll[Long]       schedule template [installment, periodBlocks,
   //         paymentsRemaining, ignored-at-order, maintenanceThresholdBps,
   //         escrowBalance]
   //   value + tokens: the collateral, plus escrowBalance in the value
   //
-  // TOOLCHAIN RULE (LOW-P3-B1 — the order reads a data input for the
-  // first time, so the rev-1 crash class applies here now): every
-  // CONTEXT.dataInputs read lives inside the SINGLE cardOk lambda,
-  // applied exactly once, behind the pin-presence branch. The shared
-  // template/pack validation is a SECOND, dataInputs-FREE lambda
-  // (conformsWith) applied twice — compiled defaults vs card-resolved
-  // values — with structurally distinct argument graphs, so no CSE
-  // merge can schedule an eager dataInputs node. Cancel and card-less
-  // match never evaluate cardOk; both carry permanent no-data-input
-  // gate probes.
+  // Card and hook are pinned by the BORROWER at creation, before match:
+  // the funder can never choose the tier or the hook. An empty pin is
+  // the card-less arm — it evaluates no data-input read at all and
+  // resolves every parameter to the compiled constants. With a pin,
+  // dataInputs(0) must be the pinned card, authenticated by NFT id AND
+  // by script hash; card values resolve with sentinel fallback (0 or
+  // empty = compiled default), and the compiled constants act as
+  // floors/outer bounds a card may tighten but never loosen. A pinned
+  // card must carry attestationType == 0 — no other type can currently
+  // be originated.
   //
-  // Cancel keeps the HIGH-O1 guard verbatim: no output may carry a
-  // token whose id equals SELF.id — the loan token remains mintable
-  // only through matchOk (provenance rule). MED-O9's whole-outputs
-  // supply fold keeps the loan token a true singleton.
+  // COMPILER CONSTRAINT — do not refactor away. The compiler hoists
+  // common subexpressions into eager top-level values above their lazy
+  // guards, and CONTEXT.dataInputs(0) throws in a transaction with no
+  // data inputs. Discipline here: every CONTEXT.dataInputs read lives
+  // inside the single cardOk lambda, applied exactly once, behind the
+  // pin-presence branch; the shared template/pack validation is a
+  // second, dataInputs-FREE lambda (conformsWith) applied twice with
+  // structurally distinct argument graphs (constant literals vs card
+  // reads), so no CSE merge can schedule an eager dataInputs node.
+  // Cancel and card-less match never evaluate cardOk. getVar reads are
+  // context-extension, not data inputs, and every .get sits behind an
+  // isDefined in the same lazy chain.
+  //
+  // Loan-token provenance: on cancel, no output may carry a token whose
+  // id equals SELF.id, so the loan token is mintable only through
+  // matchOk; on match, a fold over ALL outputs pins its total supply at
+  // exactly 1.
   // =====================================================================
 
   val borrower  = SELF.R4[Coll[Byte]].get
@@ -85,10 +82,9 @@
 
   // Pin pack: the element reads are TOTAL expressions (size-conditioned
   // with empty-coll fallback), so the compiler may hoist them anywhere
-  // without a crash path — no guarded .get for CSE to lift above its
-  // guard (LOW-P3-B1 class). A size-0 pack reads as card-less and stays
-  // cancellable; a wrong-TYPE R8 bricks like any malformed SELF
-  // register (tooling's job, creator's loss — the rev-2 posture).
+  // without creating a crash path — there is no guarded .get for CSE to
+  // lift above its guard. A size-0 pack reads as card-less and stays
+  // cancellable.
   val pinPack     = SELF.R8[Coll[Coll[Byte]]].get
   val cardPin     = if (pinPack.size >= 1) pinPack(0) else Coll[Byte]()
   val hookHash    = if (pinPack.size >= 2) pinPack(1) else Coll[Byte]()
@@ -107,7 +103,7 @@
     bondBox.tokens(0)._1 == SELF.id &&
     bondBox.tokens(0)._2 == 1L
 
-  // Loan-token supply cap (MED-O9): total across ALL outputs exactly 1.
+  // Match conjunct: loan-token total across ALL outputs is exactly 1.
   val loanId = SELF.id
   val loanTokenSupplyOne =
     OUTPUTS.fold(0L, { (acc: Long, o: Box) =>
@@ -139,12 +135,13 @@
     bondBox.R6[Long].isDefined &&
     bondBox.R6[Long].get == repayment
 
-  // Card-independent template gates (Phase 4 decision 6). Every tmpl
-  // index sits behind tmpl.size == 6 in this lazy chain; the K division
-  // sits behind the compiled MIN_PERIOD floor (the card can only RAISE
-  // the floor — conformsWith re-checks the resolved value). Coupling:
-  // installment iff payments; paymentsRemaining counts K interior
-  // coupons + 1 final bullet; K >= 1 for installment orders.
+  // Card-independent template gates. Every tmpl index sits behind
+  // tmpl.size == 6 in this lazy chain; the K division sits behind the
+  // compiled MIN_PERIOD floor (a card can only RAISE the floor —
+  // conformsWith re-checks the resolved value). Coupling: installment
+  // iff payments; paymentsRemaining counts K interior coupons + 1 final
+  // payment; K >= 1 for installment orders — an installment order with
+  // zero interior coupons must be posted as a bullet instead.
   val schedCommonOk =
     tmpl.size == 6 &&
     term >= 1 &&
@@ -165,18 +162,19 @@
   //     minCoupon, carded(0/1)]
   //   p._2: (poolNFT, collateralTokenId)
   // Checks: the resolved floors and ranges over the template; escrow ==
-  // resolvedBounty * K exactly (lockstep-drain guard base); the
-  // net-of-escrow collateral floor; whole-pack bond R9 equality against
-  // the anchored grid — 6 elements card-less, 10 with the card suffix
-  // (the resolved numerics land at bond R9 indices 6-9, REV3-LAYOUT
-  // L1); and the structured bond R8 pack — outer size by shape, element
-  // 0 (funder's lender script) nonempty, element 1 == the resolved pool
-  // NFT when the covenant is on, element 2 == the borrower-pinned hook
-  // hash when present (hook presupposes covenant: the size-3 shape
-  // carries the pool NFT at index 1). A covenant order still needs
-  // exactly one collateral token — the resolved pool's traded token —
-  // and escrow >= one resolved bounty (LOW-P3-O1: protection that
-  // cannot fire is unmatchable).
+  // resolvedBounty * K exactly, so escrow drains to zero in lockstep
+  // with the serviced checkpoints; the net-of-escrow collateral floor;
+  // whole-pack bond R9 equality against the anchored grid — 6 elements
+  // card-less, 10 with the card suffix (resolved numerics at bond R9
+  // indices 6-9); and the structured bond R8 pack — outer size by
+  // shape, element 0 the 32-byte lender-script hash with its preimage
+  // revealed in var 0, element 1 == the resolved pool NFT when the
+  // covenant is on, element 2 == the borrower-pinned hook hash when
+  // present (hook presupposes covenant: the size-3 shape carries the
+  // pool NFT at index 1). A covenant order needs exactly one collateral
+  // token — the resolved pool's traded token — and escrow >= one
+  // resolved bounty: maintenance protection that cannot fire even once
+  // is unmatchable.
   val conformsWith = { (p: (Coll[Long], (Coll[Byte], Coll[Byte]))) =>
     val n        = p._1
     val poolNft  = p._2._1
@@ -203,15 +201,11 @@
       s == (if (carded) base.append(Coll(n(0), n(1), n(2), n(3))) else base)
     } &&
     {
-      // Rev 4 (D1/D3): br8(0) is the 32-byte blake2b256 of the funder's
-      // lender script, and the match must REVEAL the preimage via ctx-ext
-      // var 0 on this order input (var 1 for the hook when pinned) — a
-      // hash nobody can open would leave the borrower unable to build any
-      // lender payment (forced default, bricked exits) or the lender
-      // without a post-maturity claim. Reveal proves the preimage EXISTS
-      // on-chain, not that it is a spendable script (funder/borrower
-      // self-burn stays the documented posture). getVar is ctx-ext, not a
-      // data input — zero D-I surface (same class as the bond's liq hook).
+      // The reveal checks: br8(0) is the 32-byte blake2b256 of the
+      // funder's lender script, and its preimage must be supplied in
+      // ctx-ext var 0 of this input (var 1 for the hook when pinned).
+      // See the context-extension contract in the header for why the
+      // reveals are required.
       val br8   = bondBox.R8[Coll[Coll[Byte]]].get
       val covOn = tmpl(4) != 0L
       val lv    = getVar[Coll[Byte]](0)
@@ -234,11 +228,10 @@
   // THE data-input lambda — every CONTEXT.dataInputs read in the
   // contract lives here, and it is applied exactly once, only on the
   // pinned-card branch. The card is authenticated by NFT id == the pin
-  // (amount exactly 1: the terms NFT is a singleton), its packs are
-  // size-guarded, its attestationType must be 0 (the rev-3 gate that
-  // keeps the bond's generic verdict branch unreachable), and its
-  // sentinel fields resolve IN-CONTRACT to the compiled defaults before
-  // the shared conformance check runs.
+  // (amount exactly 1: the terms NFT is a singleton) AND by script
+  // hash, its packs are size-guarded, its attestationType must be 0,
+  // and its sentinel fields resolve IN-CONTRACT to the compiled
+  // defaults before the shared conformance check runs.
   val cardOk = { (go: Boolean) =>
     go &&
     CONTEXT.dataInputs.size > 0 &&
@@ -247,10 +240,9 @@
       card.tokens.size >= 1 &&
       card.tokens(0)._1 == cardPin &&
       card.tokens(0)._2 == 1L &&
-      // Rev-4 audit (A-M5, user-approved): the pinned NFT proves WHICH
-      // box; this proves it is governed by the refuel-only card script —
-      // a look-alike box holding the NFT under a mutable guard cannot
-      // reprice a posted order.
+      // The pinned NFT proves WHICH box; this proves it is governed by
+      // the refuel-only card script — a look-alike box holding the NFT
+      // under a mutable guard cannot reprice a posted order.
       blake2b256(card.propositionBytes) == TERMS_BOX_HASH &&
       card.R7[Coll[Long]].isDefined &&
       card.R8[Coll[Coll[Byte]]].isDefined &&
@@ -259,37 +251,41 @@
         val c8 = card.R8[Coll[Coll[Byte]]].get
         c7.size >= 11 &&
         c8.size >= 2 &&
+        // flagWord and attestationType gated to zero: no reserved bit
+        // or type is matchable before its semantics exist.
         c7(9) == 0L &&
-        // Rev-4 audit: flagWord gated to zero like attestationType — no
-        // reserved bit ships matchable before its semantics exist.
         c7(10) == 0L &&
-        // Rev-4 audit: card byte fields are token ids — 32 bytes or the
-        // empty sentinel, nothing else.
+        // Card byte fields are token ids — 32 bytes or the empty
+        // sentinel, nothing else.
         (c8(0).size == 0 || c8(0).size == 32) &&
         (c8(1).size == 0 || c8(1).size == 32) &&
-        // Free-set card numerics must be non-negative (EKB rev-3 F2): a
-        // negative bounty would flip the escrow-exactness sign and
-        // inflate the net-of-escrow collateral floor; negative grace
-        // would arm instant acceleration. Sentinel 0 = default; the
-        // clamped/max()ed fields below are sign-safe by construction.
-        // Rev-4 (A-H1/B-H2, user direction): a hook is legal ONLY if the
-        // pinned card lists its hash (card R8 indices 4+ = blessed hooks,
-        // frozen by the refuel-only guard). The hook and the terms travel
-        // as one immutable, auditable bundle — no free-floating hook
-        // hashes. Card-less orders cannot carry hooks at all (matchOk).
+        // A hook is legal ONLY if the pinned card lists its hash: card
+        // R8 indices 4 and up are the card's approved hook hashes,
+        // frozen by the refuel-only guard. Hook and terms are audited
+        // as one immutable unit — there are no free-floating hook
+        // hashes, and card-less orders cannot carry hooks at all.
         (!hookPresent || c8.slice(4, c8.size).exists { (h: Coll[Byte]) =>
           h == hookHash
         }) &&
+        // Free-set card numerics must be non-negative: a negative
+        // bounty would flip the sign of the escrow-exactness equation
+        // and inflate the net-of-escrow collateral floor; a negative
+        // grace would arm instant acceleration. The clamped fields
+        // below are sign-safe by construction.
         c7(0) >= 0L && c7(1) >= 0L && c7(2) >= 0L && c7(3) >= 0L &&
         {
           val bounty  = if (c7(0) == 0L) CRANK_BOUNTY else c7(0)
           val grace   = if (c7(1) == 0L) GRACE_BLOCKS else c7(1)
-          // Rev-4 audit: carveout and haircutKeep are OUTER bounds a card
-          // may tighten, never loosen — cap at the compiled values (an
-          // uncapped carveout lets a liquidator strip the collateral; an
-          // inflated haircutKeep nullifies the covenant).
+          // carveout and haircutKeep are OUTER bounds a card may
+          // tighten, never loosen — capped at the compiled values. An
+          // uncapped carveout would let a liquidator strip the
+          // collateral; an inflated haircutKeep would make every
+          // position price healthy and nullify the covenant.
           val carve   = if (c7(2) == 0L || c7(2) > LIQ_CARVEOUT) LIQ_CARVEOUT else c7(2)
           val haircut = if (c7(3) == 0L || c7(3) > HAIRCUT_KEEP) HAIRCUT_KEEP else c7(3)
+          // Maintenance-threshold bounds in basis points of repayment:
+          // the floor is 10000 (100% — a threshold below full coverage
+          // is not maintenance protection) and the cap 30000 (300%).
           val thrMin  = if (c7(4) < 10000L) 10000L else c7(4)
           val thrMax  = if (c7(5) <= 0L) 30000L
                         else if (c7(5) > 30000L) 30000L else c7(5)
@@ -334,11 +330,11 @@
         10000L, 30000L, MIN_ORDER_VALUE, MIN_PERIOD, MIN_COUPON, 0L),
         (POOL_NFT, COLLATERAL_TOKEN_ID))))
 
-  // Cancel: borrower-script co-spend (a contract borrower satisfies its
+  // Cancel authorization by co-spend: a contract borrower satisfies its
   // own script on a co-spent box; a P2PK borrower signs one of their
-  // boxes), conjoined with the untouched HIGH-O1 mint guard.
-  // Rev-4 audit: SELF excluded — an order whose R4 equals the order tree
-  // itself must not self-authorize its own cancel (anyone-spendable).
+  // boxes. SELF is excluded so an order whose R4 equals the order tree
+  // itself cannot self-authorize its own cancel — that would make it
+  // spendable by anyone. Conjoined with the no-mint guard below.
   val borrowerAuth = INPUTS.exists { (b: Box) =>
     b.propositionBytes == borrower && b.id != SELF.id
   }
