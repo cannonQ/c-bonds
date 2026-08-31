@@ -42,8 +42,11 @@
   //     < 0: the bond is in cure and |nextCheckHeight| is the cure
   //     deadline. paymentsRemaining counts every payment, K interior
   //     coupons + 1 final payment (K+1 at origination). installment is
-  //     nonzero on every bond this contract can hold — the paired order
-  //     forces it. thresholdBps == 0 disables the covenant entirely.
+  //     nonzero on every bond the paired order ORIGINATES (the address
+  //     itself is public — product identity rests on loan-token
+  //     provenance, not the script; indexers and keepers must check
+  //     the token, and a fabricated box here is its creator's loss).
+  //     thresholdBps == 0 disables the covenant entirely.
   //   tokens(0): (loanTokenId, 1) — minted at match; id == R4 value
   //   tokens(1): the collateral token — covenant bonds only
   //

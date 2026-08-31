@@ -183,7 +183,9 @@
   // the borrower-pinned hook hash when present. A covenant order needs
   // exactly one collateral token — the resolved pool's traded token —
   // and escrow >= one resolved bounty: maintenance protection that
-  // cannot fire even once is unmatchable.
+  // cannot fire even once is unmatchable. K >= 1 is enforced here
+  // EMERGENTLY: escrow >= one bounty plus escrow == bounty * K with a
+  // strictly positive resolved bounty forces K >= 1.
   val conformsWith = { (p: (Coll[Long], (Coll[Byte], Coll[Byte]))) =>
     val n        = p._1
     val poolNft  = p._2._1

@@ -17,9 +17,13 @@
   //          recoverable from chain history, without which a hash with
   //          no known preimage would leave the borrower unable to
   //          construct the repayment and the bond unliquidatable. A
-  //          reveal proves the preimage exists — not that it is a
-  //          spendable script; a funder revealing garbage burns only
-  //          their own claim.
+  //          reveal proves the preimage exists — not that it is
+  //          constructible as a box script. A funder revealing bytes
+  //          that cannot guard a box dead-ends BOTH parties: their own
+  //          principal AND the borrower's collateral (the bond has no
+  //          recovery path). That is a pay-to-grief attack, priced at
+  //          the full principal, accepted and documented rather than
+  //          prevented.
   //
   // Registers:
   //   R4: Coll[Byte] borrower ErgoTree bytes — the full script, because
@@ -75,11 +79,19 @@
 
   // Maturity stamped as build height + term, MATURITY_TOL blocks of lag
   // accepted (build-vs-inclusion height drift). Window bounds, never
-  // equality.
+  // equality. m > HEIGHT: a bond must never be born already
+  // liquidatable — without this, a short-term order (term <= the
+  // tolerance) lets the funder stamp a past maturity and take the
+  // collateral in the next block. Arithmetic in Long: Int addition
+  // throws on overflow, and a near-MaxValue R7 must leave the order
+  // unmatchable-but-cancellable, not crash every path.
   val maturityOk =
     bondBox.R7[Int].isDefined && {
-      val m = bondBox.R7[Int].get
-      m >= HEIGHT + term - MATURITY_TOL && m <= HEIGHT + term
+      val m      = bondBox.R7[Int].get.toLong
+      val target = HEIGHT.toLong + term.toLong
+      m > HEIGHT.toLong &&
+      m >= target - MATURITY_TOL.toLong &&
+      m <= target
     }
 
   // Bond registers: R5 is the borrower-script hash computed from our
@@ -101,9 +113,10 @@
       blake2b256(lv.get) == lh
     }
 
-  // The order's whole value (the collateral) must ride into the bond,
-  // and the borrower must keep a minimum position so a dust order
-  // cannot exist.
+  // The order's whole value (the collateral) must ride into the bond.
+  // The minimum keeps the bond's liquidation floor binding
+  // (MIN_ORDER_VALUE > LIQ_CARVEOUT, a cross-contract invariant) — a
+  // dust order can exist, but it can only be cancelled, never matched.
   val collateralOk =
     bondBox.value >= SELF.value &&
     SELF.value >= MIN_ORDER_VALUE
@@ -128,11 +141,13 @@
 
   // Cancel authorization by co-spend: a contract borrower satisfies its
   // own script on a co-spent box; a P2PK borrower signs one of their
-  // boxes. SELF is excluded so an order whose R4 equals the order tree
-  // itself cannot self-authorize its own cancel — that would make it
-  // spendable by anyone. Conjoined with the no-mint guard below.
+  // boxes. The auth input may not be guarded by THIS order script:
+  // excluding by script (not merely by box id) also blocks two
+  // pathological orders whose R4 is the order tree from authorizing
+  // each other's cancel. Conjoined with the no-mint guard below.
   val borrowerAuth = INPUTS.exists { (b: Box) =>
-    b.propositionBytes == borrower && b.id != SELF.id
+    b.propositionBytes == borrower &&
+    b.propositionBytes != SELF.propositionBytes
   }
 
   val noLoanTokenMinted = OUTPUTS.forall { (o: Box) =>

@@ -155,6 +155,13 @@
     term >= 1 &&
     tmpl(0) > 0L &&
     tmpl(1) >= MIN_PERIOD &&
+    // LOAD-BEARING — do not simplify away. Under tmpl(0) > 0 this
+    // reduces to tmpl(2) != 0, which is what kills the K block's
+    // tmpl(2) == 0 escape below. Without it an installment order with
+    // zero payments matches, and on the resulting bond coupon and
+    // missedAccel are closed forever by sched(2) > 1 while nothing
+    // else writes a cure state — the covenant would be dead on a bond
+    // this family has no crank to service.
     ((tmpl(0) == 0L) == (tmpl(2) == 0L)) &&
     {
       val k = (term.toLong - 1L) / tmpl(1)
@@ -190,6 +197,9 @@
     val collatId = p._2._2
     val carded   = n(9) == 1L
     tmpl(1) >= n(7) &&
+    // The tmpl(0) == 0L escape is dead here (schedCommonOk forces
+    // tmpl(0) > 0); kept verbatim from the shared source — the
+    // MIN_COUPON floor always binds.
     (tmpl(0) == 0L || tmpl(0) >= n(8)) &&
     (tmpl(4) == 0L ||
       (tmpl(4) >= n(4) && tmpl(4) <= n(5) &&

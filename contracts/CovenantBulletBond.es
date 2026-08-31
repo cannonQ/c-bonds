@@ -40,8 +40,11 @@
   //     Absent suffix elements fall back to the compiled constants of
   //     the same names. nextCheckHeight > 0: next checkpoint height;
   //     < 0: the bond is in cure and |nextCheckHeight| is the cure
-  //     deadline. installment and paymentsRemaining are both 0 on every
-  //     bond this contract can hold — the paired order forces them.
+  //     deadline. installment and paymentsRemaining are both 0 on
+  //     every bond the paired order ORIGINATES (the address itself is
+  //     public — product identity rests on loan-token provenance, not
+  //     the script; indexers and keepers must check the token, and a
+  //     fabricated box at this address is its creator's own loss).
   //     thresholdBps == 0 disables the covenant entirely.
   //   tokens(0): (loanTokenId, 1) — minted at match; id == R4 value
   //   tokens(1): the collateral token — covenant bonds only
@@ -368,7 +371,10 @@
   // Covenant acceleration: the cure deadline has passed and the bond is
   // unhealthy NOW. The verdict argument is the exact pre-state; the
   // call-site-distinctness burden is carried by the crank's -sched(0)
-  // term (see COMPILER CONSTRAINT).
+  // term (see COMPILER CONSTRAINT). Pays the PLAIN lender: the
+  // card-blessed hook applies only to the liquidate arm, so a covenant
+  // default before maturity routes to the lender hash even on a hooked
+  // bond — the hook binds at maturity only.
   val accelerateOk =
     nextCheck < 0L &&
     HEIGHT.toLong >= (0L - nextCheck) &&

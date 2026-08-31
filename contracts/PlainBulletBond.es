@@ -8,7 +8,10 @@
   // machinery, no data inputs on any path, no context variables.
   //
   // Registers:
-  //   R4: Coll[Byte] originating order box id (== loan token id)
+  //   R4: Coll[Byte] originating order box id (== loan token id) —
+  //                  provenance only: written and enforced by the
+  //                  order, never read by this contract (the loan
+  //                  token id is read positionally from tokens(0))
   //   R5: Coll[Byte] blake2b256 of the borrower's ErgoTree
   //   R6: Long       repayment amount, nanoERG
   //   R7: Int        maturity height
@@ -97,6 +100,9 @@
     }
   }
 
+  // The carve-out floor is binding for every conforming bond because
+  // the order enforces value >= MIN_ORDER_VALUE > LIQ_CARVEOUT — a
+  // cross-contract invariant; keep it if either constant changes.
   val liquidateOk =
     HEIGHT >= maturity &&
     toLender &&
