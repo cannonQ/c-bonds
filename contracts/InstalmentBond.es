@@ -320,8 +320,8 @@
   // the first confirmation wins. Each serviced checkpoint consumes
   // exactly one bounty; the order escrows bounty * K at origination, so
   // escrow reaches zero exactly when the last interior coupon is paid.
-  // The rev-4 sched(0) > 0 gate is gone: the paired order forces
-  // installment > 0, so it is always true.
+  // No installment-positivity gate here: installment > 0 on every
+  // originated bond (see the header's provenance note).
   val couponOk =
     sched(2) > 1L &&
     nextCheck > 0L &&
@@ -420,8 +420,8 @@
   // entirely from SELF and HEIGHT, so there is nothing for an attacker
   // to forge. Liquidation shape paying the PLAIN lender — the hook
   // applies only to the liquidate arm. Residual escrow rides to the
-  // lender. The rev-4 sched(0) > 0 gate is gone: the paired order
-  // forces installment > 0, so it is always true.
+  // lender. No installment-positivity gate here: installment > 0 on
+  // every originated bond (see the header's provenance note).
   val missedAccelOk =
     sched(2) > 1L &&
     nextCheck > 0L &&

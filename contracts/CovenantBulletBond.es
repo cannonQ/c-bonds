@@ -170,9 +170,9 @@
       }
     }
 
-  // The rev-4 sched(2) <= 1 gate is gone: it is the no-early-repayment
-  // rule for installment bonds, and the paired order forces
-  // paymentsRemaining == 0 here, so it is always true.
+  // Repay is always the full payment: there is no schedule to run
+  // down (paymentsRemaining is 0 on every originated bond), so no
+  // payment-count gate exists on this path.
   val repayOk =
     toLender &&
     exitBox.value >= repayment &&
@@ -295,9 +295,7 @@
     } else -1
   }
 
-  // Crank: the only schedule advance this product has — the rev-4
-  // sched(0) == 0 gate that closed it to installment bonds is gone,
-  // because the paired order forces installment == 0. Bounty and grace
+  // Crank: the only schedule advance this product has. Bounty and grace
   // are the resolved values from the suffix; the suffix itself rides the
   // rebuilt pack unchanged. The verdict argument keeps its - sched(0)
   // term: provably zero here, and it is what keeps this call site

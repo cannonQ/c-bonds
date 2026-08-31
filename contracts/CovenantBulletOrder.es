@@ -145,12 +145,11 @@
   // Card-independent template gates. Every tmpl index sits behind
   // tmpl.size == 6 in this lazy chain; the K division sits behind the
   // compiled MIN_PERIOD floor (a card can only RAISE the floor —
-  // conformsWith re-checks the resolved value). The product
-  // discriminators replace rev-4's installment/payments coupling and
-  // its K block: installment and paymentsRemaining are pinned to zero
-  // (bullet — the bond has no coupon arm), and the covenant threshold
-  // is required nonzero because this order originates only covenant
-  // bonds. K itself survives inside conformsWith, where escrow is still
+  // conformsWith re-checks the resolved value). Product discriminators:
+  // installment and paymentsRemaining are pinned to zero (bullet — the
+  // bond has no coupon arm), and the covenant threshold is required
+  // nonzero because this order originates only covenant bonds. K lives
+  // inside conformsWith, where escrow is still
   // required to equal one bounty per interior checkpoint.
   val schedCommonOk =
     tmpl.size == 6 &&
@@ -192,8 +191,8 @@
     val collatId = p._2._2
     val carded   = n(8) == 1L
     tmpl(1) >= n(7) &&
-    // The covenant branch is unconditional: schedCommonOk already
-    // required tmpl(4) != 0, so rev-4's tmpl(4) == 0 escape is dead.
+    // The covenant checks run unconditionally: schedCommonOk, earlier
+    // in the same lazy chain, already required tmpl(4) != 0.
     tmpl(4) >= n(4) && tmpl(4) <= n(5) &&
     SELF.tokens.size == 1 &&
     SELF.tokens(0)._1 == collatId &&
@@ -224,9 +223,9 @@
       lv.isDefined &&
       blake2b256(lv.get) == br8(0) &&
       // Two shapes only — size 2 (covenant) and size 3 (covenant +
-      // hook). Rev-4's size-1 plain shape is not producible here: the
-      // covenant is mandatory, so its rev-4 covOn conjunct is dead and
-      // the size-1 arm with it.
+      // hook). Exact size equality: a funder can write no other pack —
+      // in particular not size 4, which would seed the bond's attester
+      // slot.
       (if (hookPresent)
         br8.size == 3 && br8(1) == poolNft && br8(2) == hookHash && {
           val hv = getVar[Coll[Byte]](1)

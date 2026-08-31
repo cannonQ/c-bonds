@@ -197,9 +197,8 @@
     val collatId = p._2._2
     val carded   = n(9) == 1L
     tmpl(1) >= n(7) &&
-    // The tmpl(0) == 0L escape is dead here (schedCommonOk forces
-    // tmpl(0) > 0); kept verbatim from the shared source — the
-    // MIN_COUPON floor always binds.
+    // The tmpl(0) == 0L escape never fires (schedCommonOk forces
+    // tmpl(0) > 0), so the MIN_COUPON floor always binds.
     (tmpl(0) == 0L || tmpl(0) >= n(8)) &&
     (tmpl(4) == 0L ||
       (tmpl(4) >= n(4) && tmpl(4) <= n(5) &&
