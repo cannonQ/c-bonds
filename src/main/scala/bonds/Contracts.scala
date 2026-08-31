@@ -114,6 +114,103 @@ object Contracts {
   def termsBox(ctx: BlockchainContext): (ErgoTree, ErgoTreeContract) =
     Kit.compile(ctx, Kit.readContract("TermsBox.es"), ConstantsBuilder.empty())
 
+  // ==================== rev 5: the per-product family ====================
+  // The rev-4 monolith split by structured deletion: each bond carries
+  // only the paths its product needs, and each order forces the product
+  // discriminators its bond no longer gates. Byte-array constants go
+  // through sigma.Colls.fromArray (appkit 6.0.0 drops raw Array[Byte]
+  // constants silently) — hexBytes for hex ids, the explicit wrap for
+  // computed hashes.
+
+  private def treeHash(t: ErgoTree): sigma.Coll[Byte] =
+    sigma.Colls.fromArray(scorex.crypto.hash.Blake2b256(t.bytes).asInstanceOf[Array[Byte]])
+
+  /** B1: two paths (repay, liquidate), no successor machinery, no data
+    * inputs, no covenant — LIQ_CARVEOUT is its only compiled constant. */
+  def plainBulletBond(ctx: BlockchainContext): (ErgoTree, ErgoTreeContract) =
+    Kit.compile(ctx, Kit.readContract("PlainBulletBond.es"),
+      ConstantsBuilder.create()
+        .item("LIQ_CARVEOUT", LIQ_CARVEOUT)
+        .build())
+
+  /** O1: match or cancel, no cards, no schedule, no data inputs. */
+  def plainBulletOrder(ctx: BlockchainContext): (ErgoTree, ErgoTreeContract) = {
+    val (bondTree, _) = plainBulletBond(ctx)
+    Kit.compile(ctx, Kit.readContract("PlainBulletOrder.es"),
+      ConstantsBuilder.create()
+        .item("BOND_SCRIPT_HASH", treeHash(bondTree))
+        .item("MATURITY_TOL", MATURITY_TOL)
+        .item("MIN_ORDER_VALUE", MIN_ORDER_VALUE)
+        .build())
+  }
+
+  /** B2: checkpointed covenant, no installments — the rev-4 bond minus
+    * coupon and missedAccel. Same compiled constants as the monolith. */
+  def covenantBulletBond(ctx: BlockchainContext): (ErgoTree, ErgoTreeContract) =
+    Kit.compile(ctx, Kit.readContract("CovenantBulletBond.es"),
+      ConstantsBuilder.create()
+        .item("LIQ_CARVEOUT", LIQ_CARVEOUT)
+        .item("CRANK_BOUNTY", CRANK_BOUNTY)
+        .item("GRACE_BLOCKS", GRACE_BLOCKS)
+        .item("HAIRCUT_KEEP", HAIRCUT_KEEP)
+        .item("SPECTRUM_POOL_HASH", hexBytes(SPECTRUM_POOL_HASH))
+        .build())
+
+  /** O2: forces bullet + mandatory covenant. MIN_COUPON is gone with the
+    * installment floor — a bullet has no coupon to floor. */
+  def covenantBulletOrder(ctx: BlockchainContext): (ErgoTree, ErgoTreeContract) = {
+    val (bondTree, _) = covenantBulletBond(ctx)
+    val (cardTree, _) = termsBox(ctx)
+    Kit.compile(ctx, Kit.readContract("CovenantBulletOrder.es"),
+      ConstantsBuilder.create()
+        .item("BOND_SCRIPT_HASH", treeHash(bondTree))
+        .item("TERMS_BOX_HASH", treeHash(cardTree))
+        .item("MATURITY_TOL", MATURITY_TOL)
+        .item("MIN_ORDER_VALUE", MIN_ORDER_VALUE)
+        .item("CRANK_BOUNTY", CRANK_BOUNTY)
+        .item("MIN_PERIOD", MIN_PERIOD)
+        .item("GRACE_BLOCKS", GRACE_BLOCKS)
+        .item("LIQ_CARVEOUT", LIQ_CARVEOUT)
+        .item("HAIRCUT_KEEP", HAIRCUT_KEEP)
+        .item("POOL_NFT", hexBytes(POOL_NFT))
+        .item("COLLATERAL_TOKEN_ID", hexBytes(COLLATERAL_TOKEN_ID))
+        .build())
+  }
+
+  /** B3: the coupon is the only schedule advance — the rev-4 bond minus
+    * crank. Covenant optional per template. */
+  def instalmentBond(ctx: BlockchainContext): (ErgoTree, ErgoTreeContract) =
+    Kit.compile(ctx, Kit.readContract("InstalmentBond.es"),
+      ConstantsBuilder.create()
+        .item("LIQ_CARVEOUT", LIQ_CARVEOUT)
+        .item("CRANK_BOUNTY", CRANK_BOUNTY)
+        .item("GRACE_BLOCKS", GRACE_BLOCKS)
+        .item("HAIRCUT_KEEP", HAIRCUT_KEEP)
+        .item("SPECTRUM_POOL_HASH", hexBytes(SPECTRUM_POOL_HASH))
+        .build())
+
+  /** O3: forces installment > 0; covenant optional exactly as rev 4, so
+    * the full rev-4 order constant set including MIN_COUPON. */
+  def instalmentOrder(ctx: BlockchainContext): (ErgoTree, ErgoTreeContract) = {
+    val (bondTree, _) = instalmentBond(ctx)
+    val (cardTree, _) = termsBox(ctx)
+    Kit.compile(ctx, Kit.readContract("InstalmentOrder.es"),
+      ConstantsBuilder.create()
+        .item("BOND_SCRIPT_HASH", treeHash(bondTree))
+        .item("TERMS_BOX_HASH", treeHash(cardTree))
+        .item("MATURITY_TOL", MATURITY_TOL)
+        .item("MIN_ORDER_VALUE", MIN_ORDER_VALUE)
+        .item("CRANK_BOUNTY", CRANK_BOUNTY)
+        .item("MIN_PERIOD", MIN_PERIOD)
+        .item("MIN_COUPON", MIN_COUPON)
+        .item("GRACE_BLOCKS", GRACE_BLOCKS)
+        .item("LIQ_CARVEOUT", LIQ_CARVEOUT)
+        .item("HAIRCUT_KEEP", HAIRCUT_KEEP)
+        .item("POOL_NFT", hexBytes(POOL_NFT))
+        .item("COLLATERAL_TOKEN_ID", hexBytes(COLLATERAL_TOKEN_ID))
+        .build())
+  }
+
   def vault(ctx: BlockchainContext, ownerPk: ProveDlog, minOuts: Int = MIN_OUTS_CANONICAL): (ErgoTree, ErgoTreeContract) =
     Kit.compile(ctx, Kit.readContract("MinimalLenderVault.es"),
       ConstantsBuilder.create()
@@ -142,6 +239,25 @@ object Contracts {
         require(t.bytes.length <= 3600, s"$n tree ${t.bytes.length}B exceeds 3600B planning target")
       }
       println("size bit set on all three trees; all under the 3600B planning target")
+
+      println()
+      println("=== c-bonds rev-5 per-product family (mainnet) ===")
+      val family = Seq(
+        ("plainBulletBond",     plainBulletBond(ctx)._1),
+        ("plainBulletOrder",    plainBulletOrder(ctx)._1),
+        ("covenantBulletBond",  covenantBulletBond(ctx)._1),
+        ("covenantBulletOrder", covenantBulletOrder(ctx)._1),
+        ("instalmentBond",      instalmentBond(ctx)._1),
+        ("instalmentOrder",     instalmentOrder(ctx)._1),
+        ("termsBox",            cardTree)
+      )
+      family.foreach { case (n, t) =>
+        println(f"$n%-20s ${t.bytes.length}%5d bytes  header=0x${t.header}%02x")
+        println(f"$n%-20s address: ${Address.fromErgoTree(t, NetworkType.MAINNET)}")
+        require((t.header & 0x08).toByte != 0.toByte, s"$n tree missing size bit")
+        require(t.bytes.length <= 3600, s"$n tree ${t.bytes.length}B exceeds 3600B planning target")
+      }
+      println("size bit set on all rev-5 trees; all under the 3600B planning target")
       ()
     }
   }
