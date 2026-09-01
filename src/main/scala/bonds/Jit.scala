@@ -5,10 +5,14 @@ package bonds
   * cross-check (scorex.logging.level = "DEBUG").
   */
 object Jit {
-  private val file = new java.io.File("JITCOST.md")
+  // Internal verification record — lives in working/, which is gitignored,
+  // so cost rows never reach the published tree.
+  private val dir  = new java.io.File("working")
+  private val file = new java.io.File(dir, "JITCOST.md")
 
   def record(path: String, cost: Long): Unit = synchronized {
     if (!file.exists()) {
+      dir.mkdirs()
       val fw = new java.io.FileWriter(file)
       try fw.write(
         "# JitCost per path (Phase 1)\n\n" +
