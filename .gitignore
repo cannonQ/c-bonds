@@ -7,38 +7,24 @@ project/target/
 project/project/
 .bsp/
 
-# Editor / logs
+# Editor / IDE / Metals
 .vscode/
 .idea/
-*.log
-
-# Editor/metals artifacts
 .metals/
 .mcp.json
+.bloop/
+project/.bloop/
+project/metals.sbt
 
-# Harness/session artifacts and superseded run scraps
+# Harness/session artifacts
 .claude/
-JITCOST.raw.md
-JITCOST.run1.md
 
-# Evidence packs are internal verification records — local only
-PHASE*-EVIDENCE.md
+# ALL internal working material lives here — kickoffs, evidence packs,
+# decisions, layouts, phase/rev transaction ledgers, run logs, build plans,
+# strategy drafts. Never pushed. Anything internal goes in working/, and
+# then it needs no rule of its own.
+working/
+*/working/
 
-# Internal working docs — session kickoffs and strategy drafts stay local
-PHASE2-KICKOFF.md
-kickoff-phase1.md
-sigmafi-pooled-origination-outline.md
-PHASE3-KICKOFF.md
-PHASE4-KICKOFF.md
-PHASE4-DECISIONS.md
-TERMSBOX-HANDOFF.md
-TERMSBOX-RESEARCH.md
-TERMSBOX-VECTORS.md
-CONTRACT-DELTAS.md
-REV3-KICKOFF.md
-REV3-LAYOUT.md
-CHEESE-REVIEW.md
-REV4-DECISIONS.md
-REV4-KICKOFF.md
-REV4-EVIDENCE.md
-REV4-LAYOUT.md
+# Run logs anywhere (safety net — these belong in working/)
+*.log
