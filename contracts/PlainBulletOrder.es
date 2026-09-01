@@ -79,17 +79,23 @@
 
   // Maturity stamped as build height + term, MATURITY_TOL blocks of lag
   // accepted (build-vs-inclusion height drift). Window bounds, never
-  // equality. m > HEIGHT: a bond must never be born already
-  // liquidatable — without this, a short-term order (term <= the
-  // tolerance) lets the funder stamp a past maturity and take the
-  // collateral in the next block. Arithmetic in Long: Int addition
-  // throws on overflow, and a near-MaxValue R7 must leave the order
-  // unmatchable-but-cancellable, not crash every path.
+  // equality. m > HEIGHT + 1 is the born-liquidatable floor, and it
+  // buys exactly one thing: the bond gets at least one FULL block —
+  // the birth block itself — in which repayment is open and liquidation
+  // is not. The earlier m > HEIGHT left m == HEIGHT + 1 stampable, i.e.
+  // a bond liquidatable in the very next block. This floor does NOT
+  // make a short-term order safe: the funder still picks m anywhere in
+  // [HEIGHT + term - MATURITY_TOL, HEIGHT + term] AFTER seeing the
+  // order, so a term-2 order is a two-block bond by construction. A
+  // wide repayment window is an origination choice, not a contract
+  // guarantee. Arithmetic in Long: Int addition throws on overflow, and
+  // a near-MaxValue R7 must leave the order unmatchable-but-cancellable,
+  // not crash every path.
   val maturityOk =
     bondBox.R7[Int].isDefined && {
       val m      = bondBox.R7[Int].get.toLong
       val target = HEIGHT.toLong + term.toLong
-      m > HEIGHT.toLong &&
+      m > HEIGHT.toLong + 1L &&
       m >= target - MATURITY_TOL.toLong &&
       m <= target
     }

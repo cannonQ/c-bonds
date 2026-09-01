@@ -126,11 +126,38 @@
   }
 
   // Maturity stamped as buildHeight + term, MATURITY_TOL blocks of lag
-  // accepted. Window bounds, never equality.
+  // accepted. Window bounds, never equality. Two floors, neither of
+  // which claims more than it delivers:
+  //   m > HEIGHT + 1 — the bond gets at least one FULL block (the birth
+  //     block) in which the borrower can act and liquidation cannot.
+  //     The earlier m > HEIGHT left m == HEIGHT + 1 stampable, i.e. a
+  //     bond liquidatable in the very next block.
+  //   (m - term) + tmpl(1) > HEIGHT — the first checkpoint lands
+  //     strictly after the birth block. On this product that is the
+  //     difference between a coupon window and none at all: the bond's
+  //     couponOk needs HEIGHT >= nextCheck && HEIGHT < maturity, and
+  //     without this floor the two collapse onto the same block, no
+  //     coupon can ever be paid, repayOk's sched(2) <= 1 is never
+  //     reachable, and liquidation is the only exit. Same anchored-grid
+  //     expression conformsWith writes into bond R9(3).
+  // Neither floor makes a short-term order safe: the funder still picks
+  // m anywhere in [HEIGHT + term - MATURITY_TOL, HEIGHT + term] AFTER
+  // seeing the order, so at the K == 1 minimum (term == period + 1) the
+  // coupon window is one block wide and repayment races liquidation. A
+  // wide window is an origination choice, not a contract guarantee.
+  // tmpl(1) is read HERE, so schedCommonOk — which is what enforces
+  // tmpl.size == 6 — must precede maturityOk in matchOk; see the note
+  // there. Arithmetic in Long: Int addition throws on overflow, and a
+  // near-MaxValue R7 must leave the order unmatchable-but-cancellable,
+  // not crash every path.
   val maturityOk =
     bondBox.R7[Int].isDefined && {
-      val m = bondBox.R7[Int].get
-      m >= HEIGHT + term - MATURITY_TOL && m <= HEIGHT + term
+      val m      = bondBox.R7[Int].get.toLong
+      val target = HEIGHT.toLong + term.toLong
+      m > HEIGHT.toLong + 1L &&
+      (m - term.toLong) + tmpl(1) > HEIGHT.toLong &&
+      m >= target - MATURITY_TOL.toLong &&
+      m <= target
     }
 
   val bondRegsOk =
@@ -335,9 +362,13 @@
     loanTokenOk &&
     loanTokenSupplyOne &&
     collateralTokensOk &&
+    // ORDER IS LOAD-BEARING — do not re-sort. schedCommonOk is what
+    // enforces tmpl.size == 6, and maturityOk reads tmpl(1). Put
+    // maturityOk first and a malformed short-R9 order turns a match
+    // from a clean rejection into an index-out-of-bounds crash.
+    schedCommonOk &&
     maturityOk &&
     bondRegsOk &&
-    schedCommonOk &&
     collateralOk &&
     principalOk &&
     (if (hasPin)
